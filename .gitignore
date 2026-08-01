@@ -1,0 +1,4 @@
+temp/
+*.cast
+.DS_Store
+*.tmp
