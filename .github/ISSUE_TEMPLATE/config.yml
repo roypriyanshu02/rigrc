@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Submit a Package Manifest PR
+    url: https://github.com/roypriyanshu02/rigrc/blob/main/CONTRIBUTING.md#2-adding-a-new-package
+    about: Ready to add a new package manifest? Submit a Pull Request following our Contributing Guide.
+  - name: Report a Security Vulnerability
+    url: https://github.com/roypriyanshu02/rigrc/security/policy
+    about: Please report security vulnerabilities privately.

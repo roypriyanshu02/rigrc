@@ -1,0 +1,72 @@
+name: Bug report
+description: Report an installation failure, runtime crash, parser error, or broken symlink
+title: "[BUG] "
+labels: ["bug"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Tip:** Generate a diagnostic snapshot with `./rigrc.sh --export-diagnostics` or check system health with `./rigrc.sh --doctor`.
+
+  - type: textarea
+    id: bug_description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what went wrong.
+      placeholder: "e.g. Installer fails on Arch Linux when resolving pacman dependencies, broken dotfile symlink, rollback failure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Details
+      description: Provide details about the system and environment where the issue occurred.
+      value: |
+        - **Operating System & Distro:** (e.g., Ubuntu 24.04, Fedora 40, Arch Linux, macOS 15, Debian 12)
+        - **Bash Version:** (run `bash --version`, e.g., 5.2.26)
+        - **Execution Mode:** (e.g., Bare metal, Docker container, WSL2, GitHub Actions)
+        - **Privileges:** (e.g., Non-root with sudo, root user, rootless container)
+        - **rigrc Version / Commit:** (e.g., `v1.2.0` or commit SHA)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: To Reproduce
+      description: Steps or commands to reproduce the behavior.
+      value: |
+        1. Command executed (e.g., `./rigrc.sh -c my-config.conf --verbose`):
+        2. Terminal output or error stack trace (please wrap in code blocks):
+        3. Custom configuration or package manifest used (if applicable):
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics & Additional Context
+      description: Paste relevant sections from `dotfiles-diagnostics.json` (via `./rigrc.sh --export-diagnostics`), terminal logs, or screenshots.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checkboxes
+    attributes:
+      label: Pre-submission Checklist
+      description: Please confirm the following before submitting.
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
+        - label: I am using the latest version or commit of `rigrc`.
+          required: false

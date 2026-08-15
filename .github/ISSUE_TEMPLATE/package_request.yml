@@ -1,0 +1,87 @@
+name: Package request
+description: Request a new tool, runtime, or utility manifest in packages/
+title: "[PKG] "
+labels: ["package", "enhancement"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Note:** Want to add this package yourself? Submitting a PR to `packages/` is fast and straightforward. Check out our **[Contributing Guide](https://github.com/roypriyanshu02/rigrc/blob/main/CONTRIBUTING.md#2-adding-a-new-package)**.
+
+  - type: input
+    id: package_name
+    attributes:
+      label: Package / Tool Name
+      description: Name of the binary or package.
+      placeholder: "e.g. ripgrep, zellij, lazygit, uv"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Target Category
+      description: Which directory under `packages/` should this belong to?
+      options:
+        - "core"
+        - "shell"
+        - "dev-tools"
+        - "runtimes"
+        - "ai-agents"
+        - "security-and-net"
+        - "utilities"
+        - "sys-info"
+        - "Other / New Category"
+    validations:
+      required: true
+
+  - type: input
+    id: upstream_url
+    attributes:
+      label: Upstream Repository / Homepage
+      description: Official website or GitHub repository link.
+      placeholder: "https://github.com/owner/repo"
+    validations:
+      required: true
+
+  - type: textarea
+    id: package_managers
+    attributes:
+      label: Package Manager Targets
+      description: How is this tool installed across standard package managers?
+      value: |
+        - **apt (Debian/Ubuntu):**
+        - **dnf (Fedora/RHEL):**
+        - **pacman (Arch):**
+        - **brew (macOS):**
+        - **mise (Polyglot):**
+        - **cmd (Custom script):**
+    validations:
+      required: false
+
+  - type: textarea
+    id: shell_integration
+    attributes:
+      label: Proposed Defaults / Shell Integration (Optional)
+      description: Any suggested aliases, environment variables, config template (`[template:...]`), or `[bashrc]` hooks.
+    validations:
+      required: false
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Explain why this tool is valuable for developer workstations and system bootstrap setups.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checkboxes
+    attributes:
+      label: Package Checklist
+      options:
+        - label: I have verified this tool is actively maintained and open source.
+          required: true
+        - label: I am willing to submit a pull request adding this manifest to `packages/`.
+          required: false
