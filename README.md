@@ -1,28 +1,41 @@
-<h1 align="center">mydotfiles</h1>
-<p align="center">
-  <em>A modular dotfiles manager and machine provisioner written in pure Bash.</em>
-</p>
-<p align="center">
-  <a href="https://github.com/roypriyanshu02/mydotfiles"><img src="https://img.shields.io/github/stars/roypriyanshu02/mydotfiles?style=flat-square&color=dfb317" alt="Stars"></a>
-  <a href="https://github.com/roypriyanshu02/mydotfiles/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/roypriyanshu02/mydotfiles/ci.yml?branch=main&style=flat-square" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0284c7?style=flat-square" alt="License"></a>
-</p>
+# rigrc
 
----
+*Fast, standalone Unix environment bootstrapper in pure Bash.*
 
-A declarative machine provisioner and dotfiles manager. Decouples personal machine profiles from cross-distro package definitions with native package manager resolution, GNU Stow symlinking, and atomic backup rollbacks.
+A compiled, single-file Bash script to set up Unix systems. Installs packages, configures baseline environments (`.bashrc`, `.inputrc`, `.profile`, Git), wires package configs, and aliases, and applies best practices out-of-the-box so your machine is ready to work in minutes.
 
 ## Quick Start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/mydotfiles/main/setup.sh -o setup.sh
-chmod +x setup.sh
-./setup.sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/rigrc/main/rigrc.sh)"
+```
+
+## CLI Options
+
+```text
+USAGE
+    ./rigrc.sh [OPTIONS]
+
+OPTIONS
+    • -c, --config <file>        Load configuration file
+    • -v, --verbose              Show verbose command output
+    • -f, --force, --reset       Overwrite existing files and bypass locks
+    •     --profile <name>       Run specific group profile
+    • -y, --non-interactive      Run headlessly without interactive TUI
+    •     --verify-scripts       Prompt before running custom scripts
+    •     --list                 List available packages by group
+    •     --fmt, --format        Format configuration and manifest files
+    •     --lint                 Validate manifest and configuration syntax
+    •     --clean-symlinks       Remove broken dotfile symlinks in home directory
+    •     --rollback [snapshot]  Roll back snapshot from ~/.dotfiles.bak
+    •     --export-diagnostics   Export diagnostic snapshot to JSON file
+    •     --doctor [--fix]       Check system environment and repair missing paths
+    • -h, --help                 Show help
 ```
 
 ## Custom Configurations
 
-Write your packages, aliases, environment variables, and dotfile templates once into a `.conf` file and take them anywhere. See the **[User Guide](docs/USER_GUIDE.md)** to set up your personal repository and configure machine profiles.
+Configure once, deploy anywhere. Define your packages, aliases, environment variables, and dotfiles in a `.conf` file and take them across all your machines. Read the **[User Guide](docs/USER_GUIDE.md)** to get started.
 
 ## Contributing & Development
 
@@ -30,4 +43,4 @@ To add new package manifests or contribute upstream improvements, see the **[Con
 
 ## License
 
-[MIT](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-0284c7?style=flat-square)](LICENSE)

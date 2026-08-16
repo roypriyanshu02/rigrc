@@ -7,13 +7,13 @@ test: build
 	./test.sh
 
 lint: build
-	./setup.sh --lint
+	./rigrc.sh --lint
 
 fmt:
-	./setup.sh --fmt
+	./rigrc.sh --fmt
 
 fmt-check:
-	./setup.sh --fmt --check-only
+	./rigrc.sh --fmt --check-only
 
 check: fmt-check lint test
 

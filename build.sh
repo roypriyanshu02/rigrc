@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  BUILD SCRIPT: Compiles modular src/ and assets into standalone dist/setup.sh
+#  BUILD SCRIPT: Compiles modular src/ and assets into standalone dist/rigrc.sh
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/setup.sh}"
+OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/rigrc.sh}"
 
 # 1. Source module order
 MODULES=(
@@ -27,7 +27,7 @@ TMP_PAYLOAD="$(umask 077 && mktemp)"
 trap 'rm -f "$TMP_PAYLOAD"' EXIT INT TERM
 
 cd "$SCRIPT_DIR"
-asset_files=("default.conf" "example.conf" "packages")
+asset_files=("default.conf" "packages")
 [[ -f "wsl.conf" ]] && asset_files+=("wsl.conf")
 
 tar -czf "$TMP_PAYLOAD" --sort=name --owner=0 --group=0 --mtime='2026-01-01 00:00:00Z' \

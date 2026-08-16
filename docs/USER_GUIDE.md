@@ -6,15 +6,15 @@ This guide walks through creating your personal dotfiles repository, managing ma
 
 ## 1. Overview & Architecture
 
-`mydotfiles` separates your personal environment settings from cross-distro package definitions:
+`rigrc` separates your personal environment settings from cross-distro package definitions:
 
-- **Upstream Engine & Package Manifests**: Maintained in `mydotfiles` with multi-distro definitions (`apt`, `dnf`, `pacman`, `brew`, `cargo`), pre/post hooks, and default configuration templates.
-- **Your Personal Repository**: Contains only `setup.sh` (the self-extracting distribution bundle) and your personal configuration files (`*.conf`).
+- **Upstream Engine & Package Manifests**: Maintained in `rigrc` with multi-distro definitions (`apt`, `dnf`, `pacman`, `brew`, `cargo`), pre/post hooks, and default configuration templates.
+- **Your Personal Repository**: Contains only `rigrc.sh` (the self-extracting distribution bundle) and your personal configuration files (`*.conf`).
 
 ```mermaid
 flowchart LR
-    subgraph Upstream [roypriyanshu02/mydotfiles]
-        Engine[Core Engine] --> Bundle[setup.sh]
+    subgraph Upstream [roypriyanshu02/rigrc]
+        Engine[Core Engine] --> Bundle[rigrc.sh]
         Manifests[packages/**/*.conf] --> Bundle
         Defaults[default.conf] --> Bundle
     end
@@ -27,7 +27,7 @@ flowchart LR
     end
 
     subgraph Target [Any Fresh Machine]
-        YourRepo --> Run["./setup.sh --config=work.conf"]
+        YourRepo --> Run["./rigrc.sh --config=work.conf"]
     end
 ```
 
@@ -44,13 +44,13 @@ mkdir my-dotfiles && cd my-dotfiles
 git init
 ```
 
-### Step 2: Download `setup.sh`
+### Step 2: Download `rigrc.sh`
 
 Download the latest compiled bundle from upstream:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/mydotfiles/main/setup.sh -o setup.sh
-chmod +x setup.sh
+curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/rigrc/main/rigrc.sh -o rigrc.sh
+chmod +x rigrc.sh
 ```
 
 ### Step 3: Create Your Configuration File (`custom.conf`)
@@ -106,14 +106,14 @@ alias ll="eza -la"
 Run the built-in formatter and linter before committing:
 
 ```bash
-./setup.sh --fmt
-./setup.sh --lint
+./rigrc.sh --fmt
+./rigrc.sh --lint
 ```
 
 ### Step 5: Commit & Push
 
 ```bash
-git add setup.sh custom.conf
+git add rigrc.sh custom.conf
 git commit -m "feat: init personal dotfiles repository"
 git remote add origin https://github.com/yourname/dotfiles.git
 git push -u origin main
@@ -123,12 +123,12 @@ git push -u origin main
 
 ## 3. Automating Upstream Updates via GitHub Actions
 
-To keep your `setup.sh` bundle up-to-date with upstream bug fixes, package additions, and distro adjustments without manual downloading:
+To keep your `rigrc.sh` bundle up-to-date with upstream bug fixes, package additions, and distro adjustments without manual downloading:
 
 Create `.github/workflows/sync-upstream.yml` in your personal repo:
 
 ```yaml
-name: Sync Upstream setup.sh
+name: Sync Upstream rigrc.sh
 
 on:
   schedule:
@@ -145,18 +145,18 @@ jobs:
 
       - name: Download latest standalone bundle
         run: |
-          curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/mydotfiles/main/setup.sh -o setup.sh
-          chmod +x setup.sh
+          curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/rigrc/main/rigrc.sh -o rigrc.sh
+          chmod +x rigrc.sh
 
       - name: Validate configuration files against new bundle
         run: |
-          ./setup.sh --lint
+          ./rigrc.sh --lint
 
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: sync setup.sh with upstream"
-          file_pattern: "setup.sh"
+          commit_message: "chore: sync rigrc.sh with upstream"
+          file_pattern: "rigrc.sh"
 ```
 
 ---
@@ -170,10 +170,10 @@ git clone https://github.com/yourname/dotfiles.git ~/.dotfiles-repo
 cd ~/.dotfiles-repo
 
 # Interactive mode (TUI menu for selective installation)
-./setup.sh --config=custom.conf
+./rigrc.sh --config=custom.conf
 
 # Headless mode (fully automated setup for CI/CD, containers, or remote servers)
-./setup.sh --config=custom.conf --non-interactive
+./rigrc.sh --config=custom.conf --non-interactive
 ```
 
 ---
@@ -185,7 +185,7 @@ cd ~/.dotfiles-repo
 Audit PATH variables, broken symlinks, missing compilers, and required dependencies:
 
 ```bash
-./setup.sh --doctor --fix
+./rigrc.sh --doctor --fix
 ```
 
 ### Clean Broken Symlinks
@@ -193,7 +193,7 @@ Audit PATH variables, broken symlinks, missing compilers, and required dependenc
 Prune orphaned symlinks in `$HOME` pointing to nonexistent targets:
 
 ```bash
-./setup.sh --clean-symlinks
+./rigrc.sh --clean-symlinks
 ```
 
 ### Rollback Previous State
@@ -202,8 +202,8 @@ Every deployment creates a timestamped backup in `~/.dotfiles.bak/` with a SHA-2
 
 ```bash
 # Interactive rollback selector
-./setup.sh --rollback
+./rigrc.sh --rollback
 
 # Roll back to a specific timestamped snapshot
-./setup.sh --rollback=20260819_120000
+./rigrc.sh --rollback=20260819_120000
 ```
