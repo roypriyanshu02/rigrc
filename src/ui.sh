@@ -16,11 +16,11 @@ if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     CLR_MUTED=$'\033[38;5;244m'     # Medium Slate Gray
     CLR_TEXT=$'\033[38;5;255m'      # High-contrast White
     CLR_CARD=$'\033[48;5;236m'      # Dark background card
-    SYM_OK="✓" SYM_FAIL="✗" SYM_WARN="!" SYM_INFO="i" SYM_Q="?" SYM_DOT="●" SYM_CIRCLE="○"
+    SYM_OK="✓" SYM_FAIL="✗" SYM_WARN="!" SYM_INFO="i" SYM_Q="?" SYM_DOT="●" SYM_CIRCLE="○" SYM_BLOCKED="⊘" SYM_ARROW="↳"
 else
     RESET='' BOLD='' DIM='' ITALIC=''
     CLR_PRIMARY='' CLR_ACCENT='' CLR_SUCCESS='' CLR_WARN='' CLR_ERROR='' CLR_MUTED='' CLR_TEXT='' CLR_CARD=''
-    SYM_OK="[OK]" SYM_FAIL="[ERR]" SYM_WARN="[!]" SYM_INFO="[i]" SYM_Q="[?]" SYM_DOT="*" SYM_CIRCLE="o"
+    SYM_OK="[OK]" SYM_FAIL="[ERR]" SYM_WARN="[!]" SYM_INFO="[i]" SYM_Q="[?]" SYM_DOT="*" SYM_CIRCLE="o" SYM_BLOCKED="[-]" SYM_ARROW="->"
 fi
 
 # Standardized indentation constants (2-space increments)
@@ -73,7 +73,7 @@ _ui_input() {
     fi
     _ui_bell
     local val="" hint=""
-    [[ -n "$default_val" ]] && hint=" ${CLR_MUTED}(${default_val})${RESET}"
+    [[ -n "$default_val" ]] && hint=" ${CLR_MUTED}[${default_val}]${RESET}"
     printf '%s%s %s%s: ' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${BOLD}${prompt}${RESET}" "$hint" >&2
     if [[ ! -t 0 ]]; then
         read -r val 2>/dev/null || true
@@ -86,11 +86,11 @@ _ui_input() {
     if [[ -t 2 && -c /dev/tty ]]; then
         local display_res
         if [[ -z "$res" ]]; then
-            display_res="${CLR_MUTED}(skipped)${RESET}"
+            display_res="${CLR_MUTED}↳ skipped${RESET}"
         else
-            display_res="${CLR_TEXT}${res}${RESET}"
+            display_res="${CLR_TEXT}↳ ${res}${RESET}"
         fi
-        printf '\033[1A\033[2K%s%-12s %s\n' "$ind" "${prompt}" "$display_res" >&2
+        printf '\033[1A\033[2K%s%-16s %s\n' "$ind" "${prompt}" "$display_res" >&2
     fi
     printf '%s' "$res"
 }
@@ -114,7 +114,7 @@ _ui_password() {
     fi
     printf '\n' >&2
     if [[ -t 2 && -c /dev/tty ]]; then
-        printf '\033[1A\033[2K%s%-12s %s\n' "$ind" "${prompt}" "${CLR_MUTED}••••••••${RESET}" >&2
+        printf '\033[1A\033[2K%s%-16s %s\n' "$ind" "${prompt}" "${CLR_MUTED}••••••••${RESET}" >&2
     fi
     printf '%s' "$val"
 }
@@ -213,6 +213,22 @@ _ui_select() {
     printf '%s' "${opts[0]}"
 }
 
+_format_env_name() {
+    local raw="$1"
+    raw="${raw#!}"
+    raw="${raw#env:}"
+    raw="${raw#arch:}"
+    case "${raw,,}" in
+        wsl) echo "WSL" ;;
+        darwin|macos) echo "macOS" ;;
+        linux) echo "Linux" ;;
+        freebsd|bsd) echo "BSD" ;;
+        windows) echo "Windows" ;;
+        docker|container) echo "containers" ;;
+        *) echo "$raw" ;;
+    esac
+}
+
 _ui_multiselect() {
     local prompt="$1"
     local -n _ms_items="$2"
@@ -258,22 +274,23 @@ _ui_multiselect() {
         if [[ "$_lock" == "required" ]]; then
             _rtag="required"
         elif [[ "$_lock" == "installed:"* || "$_lock" == "installed" ]]; then
-            _rtag="already installed"
+            _rtag="installed"
         elif [[ "$_lock" == "alt:"*" installed" ]]; then
             local _at="${_lock#alt:}"
             _at="${_at% installed}"
-            _rtag="modern replacement for ${_at}"
+            _rtag="alternative to ${_at} (installed)"
         elif [[ "$_lock" == "alt:"* ]]; then
             local _at="${_lock#alt:}"
             _rtag="alternative to ${_at}"
         elif [[ "$_lock" == "unsupported:"* ]]; then
             local _r="${_lock#unsupported:}"
-            _rtag="unavailable on ${_r}"
+            local _env_label="$(_format_env_name "$_r")"
+            _rtag="unavailable on ${_env_label}"
         elif [[ "$_lock" == "disabled:missing "* ]]; then
             local _r="${_lock#disabled:missing }"
             _rtag="requires ${_r}"
         elif [[ "$_lock" == "disabled"* ]]; then
-            _rtag="disabled by config"
+            _rtag="disabled in config"
         fi
         [[ ${#_rtag} -gt $max_tag_len ]] && max_tag_len=${#_rtag}
     done
@@ -285,8 +302,16 @@ _ui_multiselect() {
             cols="$(tput cols 2>/dev/null || echo 80)"
         fi
         local ind="${LOG_INDENT:-  }"
-        printf '%s%s %s\n' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${BOLD}${prompt}${RESET}" >&2
-        printf '%s  %s\n' "$ind" "${CLR_MUTED}space toggle · a select all · enter confirm${RESET}" >&2
+
+        local display_prompt="$prompt"
+        if [[ "$prompt" =~ ^Packages[[:space:]]+in[[:space:]]+\[(.*)\]$ ]]; then
+            display_prompt="Select packages · ${BASH_REMATCH[1]}"
+        elif [[ "$prompt" == "Select package groups" ]]; then
+            display_prompt="Select package groups"
+        fi
+
+        printf '%s%s\n' "$ind" "${BOLD}${display_prompt}${RESET}" >&2
+        printf '%s%s\n\n' "$ind" "${CLR_MUTED}Space toggle · A all · Enter continue${RESET}" >&2
 
         local avail_space=$(( cols - ${#ind} - 6 - name_col_width ))
         local desc_col_width
@@ -295,7 +320,7 @@ _ui_multiselect() {
         else
             desc_col_width=$(( avail_space - 2 ))
         fi
-        [[ $desc_col_width -lt 20 ]] && desc_col_width=20
+        [[ $desc_col_width -lt 16 ]] && desc_col_width=16
 
         local i
         for i in "${!_ms_items[@]}"; do
@@ -307,17 +332,15 @@ _ui_multiselect() {
             local radio_icon=""
 
             if [[ "$lock" == "disabled"* || "$lock" == "unsupported:"* ]]; then
-                radio_icon="${CLR_MUTED}–${RESET}"
+                radio_icon="${CLR_MUTED}${SYM_BLOCKED}${RESET}"
             elif [[ "$lock" == "installed:"* || "$lock" == "installed" ]]; then
-                if [[ "$st" -eq 1 ]]; then
-                    radio_icon="${CLR_MUTED}◇${RESET}"
-                else
-                    radio_icon="${CLR_MUTED}○${RESET}"
-                fi
-            elif [[ "$lock" == "required" || "$st" -eq 1 ]]; then
-                radio_icon="${CLR_PRIMARY}●${RESET}"
+                radio_icon="${CLR_SUCCESS}${SYM_OK}${RESET}"
+            elif [[ "$lock" == "required" ]]; then
+                radio_icon="${CLR_PRIMARY}${SYM_DOT}${RESET}"
+            elif [[ "$st" -eq 1 ]]; then
+                radio_icon="${CLR_PRIMARY}${SYM_DOT}${RESET}"
             else
-                radio_icon="${CLR_MUTED}○${RESET}"
+                radio_icon="${CLR_MUTED}${SYM_CIRCLE}${RESET}"
             fi
 
             local raw_tag="" tag_fmt=""
@@ -325,12 +348,12 @@ _ui_multiselect() {
                 raw_tag="required"
                 tag_fmt="${CLR_ACCENT}${raw_tag}${RESET}"
             elif [[ "$lock" == "installed:"* || "$lock" == "installed" ]]; then
-                raw_tag="already installed"
+                raw_tag="installed"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "alt:"*" installed" ]]; then
                 local alt_target="${lock#alt:}"
                 alt_target="${alt_target% installed}"
-                raw_tag="modern replacement for ${alt_target}"
+                raw_tag="alternative to ${alt_target} (installed)"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "alt:"* ]]; then
                 local alt_target="${lock#alt:}"
@@ -338,14 +361,15 @@ _ui_multiselect() {
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "unsupported:"* ]]; then
                 local reason="${lock#unsupported:}"
-                raw_tag="unavailable on ${reason}"
+                local env_label="$(_format_env_name "$reason")"
+                raw_tag="unavailable on ${env_label}"
                 tag_fmt="${CLR_WARN}${raw_tag}${RESET}"
             elif [[ "$lock" == "disabled:missing "* ]]; then
                 local req_dep="${lock#disabled:missing }"
                 raw_tag="requires ${req_dep}"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "disabled"* ]]; then
-                raw_tag="disabled by config"
+                raw_tag="disabled in config"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             fi
 
@@ -388,7 +412,7 @@ _ui_multiselect() {
 
     # WINCH signal trap for window resizing
     _on_winch() {
-        printf '\033[%dA\033[J' "$((total + 2))" >&2
+        printf '\033[%dA\033[J' "$((total + 3))" >&2
         _render_ms_menu
     }
     trap '_on_winch' WINCH
@@ -447,14 +471,14 @@ _ui_multiselect() {
                 ;;
         esac
 
-        printf '\033[%dA' "$((total + 2))" >&2
+        printf '\033[%dA' "$((total + 3))" >&2
         _render_ms_menu
     done
 
     trap - WINCH
 
     printf '\033[?25h' >&2
-    printf '\033[%dA\033[J' "$((total + 2))" >&2
+    printf '\033[%dA\033[J' "$((total + 3))" >&2
 
     local chosen_ids=()
     local chosen_lbls=()
@@ -470,20 +494,27 @@ _ui_multiselect() {
         fi
     done
 
-    local summary_str="${chosen_lbls[*]:-none}"
-    summary_str="${summary_str// /, }"
     local ind="${LOG_INDENT:-  }"
-    printf '%s%s %s: %s %s\n' "$ind" "${CLR_SUCCESS}${SYM_OK}${RESET}" "${prompt}" "${CLR_TEXT}${summary_str}${RESET}" "${CLR_MUTED}(${#chosen_ids[@]} selected)${RESET}" >&2
+    local display_prompt="$prompt"
+    if [[ "$prompt" =~ ^Packages[[:space:]]+in[[:space:]]+\[(.*)\]$ ]]; then
+        display_prompt="Packages · ${BASH_REMATCH[1]}"
+    fi
+    printf '%s%s %s %s\n' "$ind" "${CLR_SUCCESS}${SYM_OK}${RESET}" "${display_prompt}" "${CLR_MUTED}(${#chosen_ids[@]} selected)${RESET}" >&2
 
     printf '%s ' "${chosen_ids[@]}"
 }
 
+_set_term_title() {
+    [[ -t 2 && -z "${NO_COLOR:-}" ]] && printf '\033]0;%s\007' "$1" >&2 || true
+}
+
 _ui_phase() {
     local num="$1" total="$2" title="$3"
+    _set_term_title "Dotfiles: ${title}"
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-        printf '\n%s[%s/%s]%s %s%s%s\n\n' "${CLR_MUTED}" "$num" "$total" "${RESET}" "${CLR_TEXT}${BOLD}" "$title" "${RESET}" >&2
+        printf '\n%s\n' "${CLR_TEXT}${BOLD}${title}${RESET}" >&2
     else
-        printf '\n[%s/%s] %s\n\n' "$num" "$total" "$title" >&2
+        printf '\n%s\n' "$title" >&2
     fi
 }
 
@@ -492,13 +523,21 @@ _get_remediation_hint() {
     if [[ "$err_text" == *"lock"* || "$err_text" == *"Could not get lock"* ]]; then
         printf 'Package manager lock busy. Wait for background update or clear stale lock.'
     elif [[ "$err_text" == *"404"* || "$err_text" == *"Not Found"* ]]; then
-        printf 'Asset not found. Check release URL and target architecture.'
+        printf 'Asset not found on release server. Check release URL and target architecture.'
     elif [[ "$err_text" == *"403"* || "$err_text" == *"rate limit"* || "$err_text" == *"Rate limit"* ]]; then
         printf 'GitHub API rate limit exceeded. Set GITHUB_TOKEN to proceed.'
     elif [[ "$err_text" == *"Permission denied"* || "$err_text" == *"permission denied"* ]]; then
         printf 'Permission denied. Run with sudo or fix target path permissions.'
     elif [[ "$err_text" == *"checksum mismatch"* || "$err_text" == *"Checksum mismatch"* ]]; then
         printf 'Checksum mismatch. Downloaded archive is corrupted or modified.'
+    elif [[ "$err_text" == *"No space left"* || "$err_text" == *"no space left"* ]]; then
+        printf 'Disk space exhausted. Free up disk space on target filesystem.'
+    elif [[ "$err_text" == *"timed out"* || "$err_text" == *"Timed out"* || "$err_text" == *"Operation timed out"* ]]; then
+        printf 'Operation timed out. Check network connection or increase INSTALL_TIMEOUT.'
+    elif [[ "$err_text" == *"SSL"* || "$err_text" == *"certificate"* || "$err_text" == *"TLS"* ]]; then
+        printf 'SSL/TLS certificate error. Verify system time and CA certificates.'
+    elif [[ "$err_text" == *"Connection refused"* || "$err_text" == *"Couldn't connect to server"* ]]; then
+        printf 'Connection refused. Check internet connectivity and proxy settings.'
     fi
 }
 
@@ -506,9 +545,19 @@ _extract_last_error() {
     local log_file="$1"
     [[ ! -f "$log_file" ]] && return 0
     local line=""
-    line="$(grep -v '^[[:space:]]*$' "$log_file" 2>/dev/null | tail -n 1 || true)"
+
+    # 1. Prefer decisive error lines matching high-signal diagnostic patterns
+    line="$(grep -E -i '(error:|fatal:|fail(ed|ure)?[: ]|denied|timed out|404 not found|rate limit|refused|cannot |unable to )' "$log_file" 2>/dev/null | tail -n 1 || true)"
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
+
+    # 2. Fall back to last non-empty line
+    if [[ -z "$line" ]]; then
+        line="$(grep -v '^[[:space:]]*$' "$log_file" 2>/dev/null | tail -n 1 || true)"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+    fi
+
     if [[ ${#line} -gt 120 ]]; then
         line="${line:0:117}..."
     fi
@@ -557,6 +606,7 @@ _run_with_spinner() {
 
     "$@" > "$cmd_log" 2>&1 &
     pid=$!
+    _TRACKED_CHILD_PIDS+=("$pid")
 
     local start_time=$SECONDS
     local cols=80
@@ -599,6 +649,14 @@ _run_with_spinner() {
 
     local rc=0
     wait "$pid" || rc=$?
+
+    # Remove pid from _TRACKED_CHILD_PIDS
+    local new_cpids=() cp
+    for cp in "${_TRACKED_CHILD_PIDS[@]}"; do
+        [[ "$cp" != "$pid" ]] && new_cpids+=("$cp")
+    done
+    _TRACKED_CHILD_PIDS=("${new_cpids[@]}")
+
     local total_time=$(( SECONDS - start_time ))
     printf '\033[?25h' >&2
 
@@ -631,28 +689,60 @@ _ui_render_summary() {
     local installed_count="${2:-0}"
     local backup_count="${3:-0}"
     local failed_count="${#_FAILED_PACKAGES[@]}"
+    local warning_count="${#_WARNING_MESSAGES[@]}"
 
-    _ui_header "Setup Summary"
-    printf '  %-20s %s\n' "Execution time:" "${total_time}s"
-    printf '  %-20s %s\n' "Packages:" "${installed_count}"
-    if [[ $backup_count -gt 0 && -n "${BACKUP_DIR:-}" ]]; then
-        printf '  %-20s %s %s\n' "Backups:" "${backup_count}" "${CLR_MUTED}(${BACKUP_DIR})${RESET}"
+    local time_fmt=""
+    if [[ $total_time -ge 60 ]]; then
+        local mins=$(( total_time / 60 ))
+        local secs=$(( total_time % 60 ))
+        printf -v time_fmt '%dm %02ds' "$mins" "$secs"
     else
-        printf '  %-20s %s\n' "Backups:" "${backup_count}"
+        time_fmt="${total_time}s"
+    fi
+
+    _set_term_title "Dotfiles: Complete"
+    echo "" >&2
+    if [[ $failed_count -eq 0 && $warning_count -eq 0 ]]; then
+        printf '%s\n\n' "${BOLD}${CLR_SUCCESS}Setup complete${RESET}" >&2
+    elif [[ $failed_count -eq 0 ]]; then
+        printf '%s\n\n' "${BOLD}Setup complete with ${warning_count} warning(s)${RESET}" >&2
+    else
+        printf '%s\n\n' "${BOLD}${CLR_ERROR}Setup completed with ${failed_count} error(s)${RESET}" >&2
+    fi
+
+    printf '  %-22s %s\n' "Installed packages:" "${installed_count}" >&2
+    if [[ $backup_count -gt 0 ]]; then
+        printf '  %-22s %s\n' "Backed up files:" "${backup_count}" >&2
+    fi
+    printf '  %-22s %s\n' "Time elapsed:" "${time_fmt}" >&2
+
+    if [[ -n "${BACKUP_DIR:-}" && $backup_count -gt 0 ]]; then
+        echo "" >&2
+        printf '%s\n' "${BOLD}Backup${RESET}" >&2
+        printf '  %s\n' "${CLR_MUTED}${BACKUP_DIR}${RESET}" >&2
+    fi
+
+    if [[ $warning_count -gt 0 ]]; then
+        echo "" >&2
+        printf '%s\n' "${BOLD}${CLR_WARN}Warnings${RESET}" >&2
+        local w
+        for w in "${_WARNING_MESSAGES[@]}"; do
+            printf '  %s %s\n' "${CLR_WARN}!${RESET}" "$w" >&2
+        done
     fi
 
     if [[ $failed_count -gt 0 ]]; then
-        printf '  %-20s %s\n' "Failures:" "${CLR_ERROR}${failed_count}${RESET}"
+        echo "" >&2
+        printf '%s\n' "${BOLD}${CLR_ERROR}Failures (${failed_count})${RESET}" >&2
         local fp
         for fp in "${_FAILED_PACKAGES[@]}"; do
             local r="${_FAILURE_REASONS["$fp"]:-unknown error}"
-            printf '    %s %s (%s)\n' "${CLR_ERROR}✗${RESET}" "${BOLD}${fp}${RESET}" "${CLR_MUTED}${r}${RESET}"
+            printf '  %s %s\n' "${CLR_ERROR}✗${RESET}" "${BOLD}${fp}${RESET}" >&2
+            printf '    %s %s\n' "${CLR_ERROR}↳${RESET}" "${CLR_MUTED}${r}${RESET}" >&2
             local rhint
             rhint="$(_get_remediation_hint "$r")"
-            [[ -n "$rhint" ]] && printf '      %s %s\n' "${CLR_WARN}↳ hint:${RESET}" "${CLR_MUTED}${rhint}${RESET}"
+            [[ -n "$rhint" ]] && printf '      %s %s\n' "${CLR_WARN}hint:${RESET}" "${CLR_MUTED}${rhint}${RESET}" >&2
         done
-    else
-        printf '  %-20s %s\n' "Status:" "${CLR_SUCCESS}${BOLD}Completed successfully${RESET}"
     fi
-    echo ""
+    echo "" >&2
 }
