@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [ "Test" ]
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
+
+jobs:
+  release:
+    name: Build & Publish Release
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+
+      - name: Compile standalone release bundle
+        run: |
+          ./build.sh
+          test -f rigrc.sh
+          test -x rigrc.sh
+
+      - name: Generate Checksums & Release Notes
+        id: notes
+        run: |
+          sha256sum rigrc.sh > rigrc.sh.sha256
+          sha_val="$(awk '{print $1}' rigrc.sh.sha256)"
+          bundle_size="$(ls -lh rigrc.sh | awk '{print $5}')"
+          tag_name="${{ github.event.workflow_run.head_branch || github.ref_name }}"
+          if [[ -z "$tag_name" || "$tag_name" == "main" ]]; then
+            tag_name="$(git describe --tags --exact-match 2>/dev/null || echo "$tag_name")"
+          fi
+          echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
+
+          cat << NOTES > RELEASE_NOTES.md
+          ## 📦 Standalone Release Bundle
+
+          | Asset | SHA-256 Checksum | Size |
+          | :--- | :--- | :--- |
+          | \`rigrc.sh\` | \`${sha_val}\` | \`${bundle_size}\` |
+
+          ### Quick Start
+
+          \`\`\`bash
+          bash -c "\$(curl -fsSL https://github.com/${{ github.repository }}/releases/download/${tag_name}/rigrc.sh)"
+          \`\`\`
+
+          ### Direct Download
+
+          \`\`\`bash
+          curl -fsSL https://github.com/${{ github.repository }}/releases/download/${tag_name}/rigrc.sh -o rigrc.sh
+          chmod +x rigrc.sh
+          ./rigrc.sh
+          \`\`\`
+          NOTES
+
+          cat << SUMMARY >> "$GITHUB_STEP_SUMMARY"
+          ## 🚀 GitHub Release Published
+          - **Tag**: \`${tag_name}\`
+          - **Bundle Size**: \`${bundle_size}\`
+          - **SHA256**: \`${sha_val}\`
+          - **Asset**: [\`rigrc.sh\`](https://github.com/${{ github.repository }}/releases/download/${tag_name}/rigrc.sh)
+          SUMMARY
+
+      - name: Publish GitHub Release
+        run: |
+          tag_name="${{ steps.notes.outputs.tag_name }}"
+          gh release create "${tag_name}" \
+            --title "${tag_name}" \
+            --notes-file RELEASE_NOTES.md \
+            --generate-notes \
+            rigrc.sh rigrc.sh.sha256
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: 'rigrc.sh'

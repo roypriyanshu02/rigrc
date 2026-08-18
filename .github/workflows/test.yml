@@ -1,0 +1,118 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+      - 'temp/**'
+      - '.gitignore'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+      - 'temp/**'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
+
+jobs:
+  lint:
+    name: Lint & Syntax Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate Workflow Syntax & YAML
+        run: |
+          python3 -m pip install --quiet --break-system-packages pyyaml 2>/dev/null || python3 -m pip install --quiet pyyaml 2>/dev/null || true
+          python3 -c "import yaml, glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/**/*.yml', recursive=True)]; print('All GitHub workflows and configs valid YAML.')"
+
+      - name: Run ShellCheck
+        run: |
+          which shellcheck >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck 2>/dev/null || true)
+          shellcheck --version
+          shellcheck --severity=error -s bash src/*.sh build.sh test.sh tests/*.sh
+
+      - name: Build standalone bundle
+        run: |
+          ./build.sh
+          test -f rigrc.sh
+          test -x rigrc.sh
+
+      - name: Check manifest and template formatting
+        run: |
+          ./rigrc.sh --fmt --check-only
+
+      - name: Run static manifest linter
+        run: |
+          ./rigrc.sh --lint
+
+  test:
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup modern Bash (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew untap aws/tap 2>/dev/null || true
+          HOMEBREW_NO_REQUIRE_TAP_TRUST=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install bash || true
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+
+      - name: Build standalone bundle
+        run: |
+          ./build.sh
+          test -f rigrc.sh
+          test -x rigrc.sh
+
+      - name: Run automated test suite
+        run: |
+          ./test.sh
+
+      - name: Generate CI Job Summary
+        if: always()
+        run: |
+          bundle_size="$(ls -lh rigrc.sh 2>/dev/null | awk '{print $5}' || echo 'N/A')"
+          bundle_sha="$(sha256sum rigrc.sh 2>/dev/null | awk '{print $1}' || shasum -a 256 rigrc.sh 2>/dev/null | awk '{print $1}' || echo 'N/A')"
+          cat << SUMMARY >> "$GITHUB_STEP_SUMMARY"
+          ### 🧪 CI Test & Build Summary (${{ matrix.os }})
+          - **Status**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}
+          - **Runner OS**: \`${{ matrix.os }}\`
+          - **Commit**: \`${{ github.sha }}\`
+          - **Bundle Size**: \`${bundle_size}\`
+          - **Bundle SHA256**: \`${bundle_sha}\`
+          SUMMARY
+
+      - name: Upload compiled bundle artifact
+        if: matrix.os == 'ubuntu-latest' && !env.ACT
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: rigrc-bundle-${{ github.sha }}
+          path: rigrc.sh
+          retention-days: 7
+          if-no-files-found: error
