@@ -30,6 +30,7 @@ _write_file() {
         else
             local tmp
             tmp="$(mktemp "${TMPDIR:-/tmp}/dotfiles_sys_XXXXXX")"
+            _TRACKED_TMP_FILES+=("$tmp")
             printf '%s' "$content" > "$tmp"
             _sudo mkdir -p "$(dirname "$dest")"
             _sudo cp "$tmp" "$dest"
@@ -55,10 +56,11 @@ _write_file() {
             mkdir -p "$(dirname "$stow_src")"
             local tmp
             tmp="$(mktemp "${stow_src}.XXXXXX")"
+            _TRACKED_TMP_FILES+=("$tmp")
             printf '%s' "$content" > "$tmp"
             chmod 644 "$tmp" 2>/dev/null || true
             mv "$tmp" "$stow_src"
-            log_success "Wrote template: ${target}"
+            printf '%s%s %s\n' "${LOG_INDENT:-    }" "${CLR_MUTED}↳${RESET}" "${CLR_MUTED}${target}${RESET}" >&2
         fi
     fi
 
@@ -162,6 +164,10 @@ _rollback_latest_backup() {
     while IFS= read -r -d '' bak_file; do
         local rel="${bak_file#"$chosen_bak/"}"
         [[ "$rel" == ".backup_manifest.json" ]] && continue
+        if [[ "$rel" == *".."* || "$rel" == /* ]]; then
+            log_warn "Skipping invalid snapshot file path: ${rel}"
+            continue
+        fi
         local dest="$HOME/$rel"
         mkdir -p "$(dirname "$dest")"
         cp -a "$bak_file" "$dest"
@@ -353,14 +359,7 @@ deploy_stow() {
         fi
     done < <(find "$DOTFILES_DIR" -type f -print0)
 
-    if command -v stow >/dev/null 2>&1; then
-        if [[ "$DRY_RUN" == true ]]; then
-            log_action "Would link dotfiles with GNU Stow"
-        else
-            stow -R --target="$HOME" --dir="$DOTFILES_DIR" .
-            log_success "Linked dotfiles with GNU Stow."
-        fi
-    else
+    _deploy_direct_symlinks() {
         local file dest ignore_patterns=()
         if [[ -f "$DOTFILES_DIR/.stow-local-ignore" ]]; then
             local p
@@ -392,6 +391,21 @@ deploy_stow() {
             fi
         done < <(find "$DOTFILES_DIR" -type f -print0)
         log_success "Linked dotfiles directly."
+    }
+
+    if command -v stow >/dev/null 2>&1; then
+        if [[ "$DRY_RUN" == true ]]; then
+            log_action "Would link dotfiles with GNU Stow"
+        else
+            if stow -R --target="$HOME" --dir="$DOTFILES_DIR" . 2>/dev/null; then
+                log_success "Linked dotfiles with GNU Stow."
+            else
+                log_warn "GNU Stow encountered conflicts; falling back to direct symlinking..."
+                _deploy_direct_symlinks
+            fi
+        fi
+    else
+        _deploy_direct_symlinks
     fi
 }
 
@@ -480,7 +494,8 @@ setup_github_ssh() {
 
     if [[ -z "$key_to_use" ]]; then
         if [[ -z "$email" ]]; then
-            log_warn "Git email is not configured. Cannot generate SSH key."
+            _WARNING_MESSAGES+=("Git email is not configured. SSH key generation was skipped.
+    Configure it with: git config --global user.email \"you@example.com\"")
             return 0
         fi
 
@@ -506,6 +521,7 @@ setup_github_ssh() {
         if command -v ssh-add >/dev/null 2>&1; then
             if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
                 eval "$(ssh-agent -s)" >/dev/null 2>&1 || true
+                [[ -n "${SSH_AGENT_PID:-}" ]] && _TRACKED_CHILD_PIDS+=("$SSH_AGENT_PID")
             fi
             ssh-add "$key_to_use" >/dev/null 2>&1 || true
         fi

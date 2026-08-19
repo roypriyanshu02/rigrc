@@ -23,7 +23,7 @@ _check_cond_match() {
     local target="$1" list_str="$2"
     [[ -z "$list_str" ]] && return 1
     local clean_target="${target#arch:}"
-    clean_target="${clean_target#profile:}"
+    clean_target="${clean_target#env:}"
     _in_cond_list "$target" "$list_str" || _in_cond_list "$clean_target" "$list_str"
 }
 
@@ -52,8 +52,8 @@ _eval_cond() {
         else
             if [[ "$c" == "arch:"* ]]; then
                 not_c="arch:!${c#arch:}"
-            elif [[ "$c" == "profile:"* ]]; then
-                not_c="profile:!${c#profile:}"
+            elif [[ "$c" == "env:"* ]]; then
+                not_c="env:!${c#env:}"
             else
                 not_c="!$c"
             fi
@@ -68,16 +68,18 @@ _eval_cond() {
         fi
 
         local bare_c="$c"
-        bare_c="${bare_c#profile:}"
-        bare_c="${bare_c/profile:/}"
+        bare_c="${bare_c#env:}"
+        bare_c="${bare_c/env:/}"
 
         case "$bare_c" in
-            desktop|linux)                        [[ "$(_get_profile)" == "desktop" || "$(uname -s)" == Linux ]] || return 1 ;;
-            '!desktop'|'!linux')                  [[ "$(_get_profile)" != "desktop" && "$(uname -s)" != Linux ]] || return 1 ;;
+            desktop)                              [[ "$(_get_env)" == "desktop" ]] || return 1 ;;
+            '!desktop')                           [[ "$(_get_env)" != "desktop" ]] || return 1 ;;
+            linux)                                [[ "$(uname -s)" == Linux ]] || return 1 ;;
+            '!linux')                             [[ "$(uname -s)" != Linux ]] || return 1 ;;
             wsl)                                  _is_wsl || return 1 ;;
             '!wsl')                               _is_wsl && return 1 ;;
-            vps)                                  [[ "$(_get_profile)" == "vps" ]] || return 1 ;;
-            '!vps')                               [[ "$(_get_profile)" != "vps" ]] || return 1 ;;
+            vps)                                  [[ "$(_get_env)" == "vps" ]] || return 1 ;;
+            '!vps')                               [[ "$(_get_env)" != "vps" ]] || return 1 ;;
             container)                            _is_container || return 1 ;;
             '!container')                         _is_container && return 1 ;;
             arch:x86_64|x86_64|arch:amd64|amd64)     [[ "$sys_arch" == x86_64 ]] || return 1 ;;
@@ -111,8 +113,8 @@ _get_failed_cond_reason() {
         else
             if [[ "$c" == "arch:"* ]]; then
                 not_c="arch:!${c#arch:}"
-            elif [[ "$c" == "profile:"* ]]; then
-                not_c="profile:!${c#profile:}"
+            elif [[ "$c" == "env:"* ]]; then
+                not_c="env:!${c#env:}"
             else
                 not_c="!$c"
             fi
@@ -128,19 +130,31 @@ _get_failed_cond_reason() {
         fi
 
         local bare_c="$c"
-        bare_c="${bare_c#profile:}"
-        bare_c="${bare_c/profile:/}"
+        bare_c="${bare_c#env:}"
+        bare_c="${bare_c/env:/}"
 
         case "$bare_c" in
-            desktop|linux)
-                if [[ "$(_get_profile)" != "desktop" && "$(uname -s)" != Linux ]]; then
-                    printf '%s' "$(_get_profile)"
+            desktop)
+                if [[ "$(_get_env)" != "desktop" ]]; then
+                    printf '%s' "$(_get_env)"
                     return 0
                 fi
                 ;;
-            '!desktop'|'!linux')
-                if [[ "$(_get_profile)" == "desktop" || "$(uname -s)" == Linux ]]; then
-                    printf '%s' "$(_get_profile)"
+            '!desktop')
+                if [[ "$(_get_env)" == "desktop" ]]; then
+                    printf 'desktop'
+                    return 0
+                fi
+                ;;
+            linux)
+                if [[ "$(uname -s)" != Linux ]]; then
+                    printf '%s' "$(uname -s)"
+                    return 0
+                fi
+                ;;
+            '!linux')
+                if [[ "$(uname -s)" == Linux ]]; then
+                    printf 'linux'
                     return 0
                 fi
                 ;;
@@ -157,13 +171,13 @@ _get_failed_cond_reason() {
                 fi
                 ;;
             vps)
-                if [[ "$(_get_profile)" != "vps" ]]; then
-                    printf '%s' "$(_get_profile)"
+                if [[ "$(_get_env)" != "vps" ]]; then
+                    printf '%s' "$(_get_env)"
                     return 0
                 fi
                 ;;
             '!vps')
-                if [[ "$(_get_profile)" == "vps" ]]; then
+                if [[ "$(_get_env)" == "vps" ]]; then
                     printf 'vps'
                     return 0
                 fi
@@ -453,7 +467,7 @@ _parse_section_header() {
         fi
         l_ident="${l_ident%.conf}"
         l_ident="${l_ident#.}"
-        if [[ "$l_ident" == *config && "$l_ident" != "config" && "$l_ident" != */* ]]; then
+        if [[ "$l_ident" == *config && "$l_ident" != "config" && "$l_ident" != */* && "$l_ident" != *"-"* ]]; then
             l_ident="${l_ident%config}"
         fi
     fi
@@ -740,21 +754,17 @@ _select_config_file() {
     done
 
     if [[ ${#available_configs[@]} -eq 0 ]]; then
-        CONFIG_FILE="$sdir/default.conf"
+        CONFIG_FILE=""
     elif [[ ${#available_configs[@]} -eq 1 ]]; then
         CONFIG_FILE="$sdir/${available_configs[0]}"
     else
         # Multiple configurations found
         if [[ "${NON_INTERACTIVE:-false}" == false ]]; then
             local choice
-            choice="$(_ui_select "Multiple configuration files found. Select profile:" "${available_configs[@]}")"
+            choice="$(_ui_select "Multiple configuration files found. Select environment:" "${available_configs[@]}")"
             CONFIG_FILE="$sdir/${choice}"
         else
-            if [[ -f "$sdir/default.conf" ]]; then
-                CONFIG_FILE="$sdir/default.conf"
-            else
-                CONFIG_FILE="$sdir/${available_configs[0]}"
-            fi
+            CONFIG_FILE="$sdir/${available_configs[0]}"
         fi
     fi
 }
@@ -775,8 +785,11 @@ _preload_all_manifests() {
     _CONF_TMPL_BUF=()
     _CONF_TMPL_DIS=()
 
-    # Layer 1: default.conf
-    local layer1="$SCRIPT_DIR/default.conf"
+    # Layer 1: Base configuration (src/base.conf)
+    local layer1="$SCRIPT_DIR/src/base.conf"
+    if [[ ! -f "$layer1" && -f "$SCRIPT_DIR/base.conf" ]]; then
+        layer1="$SCRIPT_DIR/base.conf"
+    fi
     if [[ -f "$layer1" ]]; then
         _parse_single_conf_file "$layer1" "global"
     fi
@@ -795,7 +808,7 @@ _preload_all_manifests() {
     fi
 
     # Layer 3: $CONFIG_FILE (selected or custom user config)
-    if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE:-}" && "$CONFIG_FILE" != "$SCRIPT_DIR/default.conf" ]]; then
+    if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE:-}" && "$CONFIG_FILE" != "$layer1" ]]; then
         _parse_single_conf_file "$CONFIG_FILE" "global"
     fi
 
@@ -918,12 +931,12 @@ _prompt_confirm() {
     fi
     local answer="" prompt_hint="" ind="${PROMPT_INDENT:-  }"
     if [[ "$default_yes" == true ]]; then
-        prompt_hint="${CLR_MUTED}(${CLR_SUCCESS}${BOLD}Y${RESET}${CLR_MUTED}/n)${RESET}"
+        prompt_hint="${CLR_MUTED}[Y/n]${RESET}"
     else
-        prompt_hint="${CLR_MUTED}(y/${CLR_WARN}${BOLD}N${RESET}${CLR_MUTED})${RESET}"
+        prompt_hint="${CLR_MUTED}[y/N]${RESET}"
     fi
     _ui_bell
-    printf '%s%s %s %s ' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${BOLD}${msg}${RESET}" "$prompt_hint" >&2
+    printf '%s%s %s %s: ' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${msg}" "$prompt_hint" >&2
     if [[ ! -t 0 ]]; then
         read -r answer 2>/dev/null || true
     elif [[ -c /dev/tty ]]; then
@@ -931,17 +944,28 @@ _prompt_confirm() {
     else
         read -r answer 2>/dev/null || true
     fi
+    local res_code=0
     if [[ "$default_yes" == true ]]; then
         case "$answer" in
-            [nN]|[nN][oO]) return 1 ;;
-            *) return 0 ;;
+            [nN]|[nN][oO]) res_code=1 ;;
+            *) res_code=0 ;;
         esac
     else
         case "$answer" in
-            [yY]|[yY][eE][sS]) return 0 ;;
-            *) return 1 ;;
+            [yY]|[yY][eE][sS]) res_code=0 ;;
+            *) res_code=1 ;;
         esac
     fi
+    if [[ -t 2 && -c /dev/tty ]]; then
+        local disp_ans
+        if [[ $res_code -eq 0 ]]; then
+            disp_ans="${CLR_SUCCESS}↳ yes${RESET}"
+        else
+            disp_ans="${CLR_MUTED}↳ no${RESET}"
+        fi
+        printf '\033[1A\033[2K%s%-24s %s\n' "$ind" "${msg}" "$disp_ans" >&2
+    fi
+    return $res_code
 }
 
 # Return distro-specific package name, or the default name if none specified.

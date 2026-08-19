@@ -72,6 +72,11 @@ assert_eq "" "$si" "_parse_section_header config empty ident"
 assert_eq "append" "$sm" "_parse_section_header config default mod"
 assert_eq "0" "$sv" "_parse_section_header config valid code"
 
+_parse_section_header "package:pkg-config" st si sm sv
+assert_eq "package" "$st" "_parse_section_header pkg-config type"
+assert_eq "pkg-config" "$si" "_parse_section_header pkg-config preserves name"
+assert_eq "0" "$sv" "_parse_section_header pkg-config valid code"
+
 _parse_section_header "invalid_section_type_xyz" st si sm sv
 assert_eq "1" "$sv" "_parse_section_header invalid header code"
 
@@ -97,12 +102,16 @@ assert_eq "" "$(printf '%s' "$(date +%s)" > "${TMPDIR:-/tmp}/.dotfiles_bell_$$";
 # Test _select_config_file
 (
     tmp_cfg_dir="$(mktemp -d)"
-    touch "$tmp_cfg_dir/default.conf"
+    CONFIG_FILE="init"
+    _select_config_file "$tmp_cfg_dir"
+    assert_eq "" "$CONFIG_FILE" "_select_config_file sets empty CONFIG_FILE when no user config exists"
+
     touch "$tmp_cfg_dir/work.conf"
     CONFIG_FILE=""
     _select_config_file "$tmp_cfg_dir"
-    assert_eq "$tmp_cfg_dir/default.conf" "$CONFIG_FILE" "_select_config_file falls back to default.conf in non-interactive"
+    assert_eq "$tmp_cfg_dir/work.conf" "$CONFIG_FILE" "_select_config_file selects single custom config"
 
+    touch "$tmp_cfg_dir/home.conf"
     chosen_cfg=""
     chosen_cfg="$(printf '2\n' | (CONFIG_FILE=""; NON_INTERACTIVE=false; _select_config_file "$tmp_cfg_dir"; printf '%s' "$CONFIG_FILE"))"
     assert_eq "$tmp_cfg_dir/work.conf" "$chosen_cfg" "_select_config_file selects choice interactively"
@@ -163,19 +172,20 @@ else
     assert_failure "_eval_cond linux fails on non-Linux" _eval_cond 'linux' ''
     assert_success "_eval_cond !linux succeeds on non-Linux" _eval_cond '!linux' ''
 fi
-assert_success "_eval_cond desktop succeeds on desktop/Linux" _eval_cond 'desktop' ''
-assert_success "_eval_cond profile:desktop succeeds with normalized tag" _eval_cond 'profile:desktop' ''
+assert_success "_eval_cond desktop succeeds when ENV=desktop" bash -c "source '${SETUP_SCRIPT}'; ENV='desktop'; _eval_cond 'desktop' ''"
+assert_failure "_eval_cond desktop fails when ENV=vps" bash -c "source '${SETUP_SCRIPT}'; ENV='vps'; _eval_cond 'desktop' ''"
+assert_success "_eval_cond env:desktop succeeds with normalized tag when ENV=desktop" bash -c "source '${SETUP_SCRIPT}'; ENV='desktop'; _eval_cond 'env:desktop' ''"
 
 # Test _eval_cond: COND override path
 reset_test_state
 _CONF_CASCADE_DONE=1
 COND="custom_flag"
 assert_success "_eval_cond skips unknown cond when COND override matches" _eval_cond 'custom_flag' ''
-assert_success "_eval_cond matches profile prefix against bare COND override" bash -c "
+assert_success "_eval_cond matches env prefix against bare COND override" bash -c "
   source '${SETUP_SCRIPT}'
   _CONF_CASCADE_DONE=1
   COND='vps'
-  _eval_cond 'profile:vps' ''
+  _eval_cond 'env:vps' ''
 "
 assert_failure "_eval_cond fails when DISABLE_COND suppresses matching cond" bash -c "
   source '${SETUP_SCRIPT}'

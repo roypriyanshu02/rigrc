@@ -30,7 +30,6 @@ _get_backup_dir() {
         (umask 077 && mkdir -p "$bdir")
         BACKUP_DIR="$bdir"
     fi
-    printf '%s' "$BACKUP_DIR"
 }
 
 # ---------------------------------------------------------------------------
@@ -40,7 +39,7 @@ DRY_RUN=false
 VERBOSE="${VERBOSE:-false}"
 VERIFY_SCRIPTS="${VERIFY_SCRIPTS:-false}"
 FORCE="${FORCE:-false}"
-PROFILE="${PROFILE:-}"
+ENV="${ENV:-}"
 OFFLINE="${OFFLINE:-false}"
 INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-300}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -49,15 +48,17 @@ NETWORK_TIMEOUT="${NETWORK_TIMEOUT:-15}"
 BACKUP_COUNT=0
 SUDO_PID=""
 
-# Failure registry and diagnostic capture
+# Failure and warning registries
 declare -a _FAILED_PACKAGES=()
 declare -A _FAILURE_REASONS=()
+declare -a _WARNING_MESSAGES=()
+declare -A _DEP_RESOLVE_STACK=()
 _LAST_CMD_ERROR=""
 
 # System detection and lookup caches
 _SYS_ARCH_CACHE=""
 _SYS_DISTRO_CACHE=""
-_SYS_PROFILE_CACHE=""
+_SYS_ENV_CACHE=""
 _SYS_IS_WSL_CACHE=""
 _SYS_IS_CONTAINER_CACHE=""
 
@@ -78,13 +79,10 @@ if [[ -z "${INSTALL_GROUPS+x}" ]]; then
     declare -a INSTALL_GROUPS=()
 fi
 
-# Install queues: managed by install_packages and _flush_native_q
+# Package manager & metrics state
 _PM=""
 SKIP_UPGRADE=false
-declare -a _NATIVE_Q=()
-declare -a _SCRIPT_NAMES=() _SCRIPT_CMDS=()
-declare -a _FALLBACK_NAMES=() _FALLBACK_BINS=() _FALLBACK_CMDS=()
-declare -a _POST_CMDS=() _POST_NAMES=()
+declare -i _INSTALLED_PACKAGES_COUNT=0
 
 # In-memory package & group manifest cache
 declare -a _GROUPS_LIST=()
@@ -118,7 +116,7 @@ declare -a _TRACKED_CHILD_PIDS=()
 # ---------------------------------------------------------------------------
 _cleanup() {
     local code="${1:-$?}"
-    [[ -t 2 ]] && printf '\033[?25h' >&2 || true
+    [[ -t 2 ]] && printf '\033[?25h\033]0;\007' >&2 || true
     [[ -n "$SUDO_PID" ]] && kill "$SUDO_PID" 2>/dev/null || true
 
     # Clean tracked background children
@@ -126,7 +124,9 @@ _cleanup() {
         local cpid
         for cpid in "${_TRACKED_CHILD_PIDS[@]}"; do
             kill -TERM "$cpid" 2>/dev/null || true
+            kill -KILL "$cpid" 2>/dev/null || true
         done
+        _TRACKED_CHILD_PIDS=()
     fi
 
     # Remove backup dir if empty (no files backed up)
@@ -142,6 +142,7 @@ _cleanup() {
         for tf in "${_TRACKED_TMP_FILES[@]}"; do
             [[ -f "$tf" ]] && rm -f "$tf"
         done
+        _TRACKED_TMP_FILES=()
     fi
     [[ "$code" -ne 0 ]] && log_error "Setup interrupted with exit code $code." || true
 }
@@ -215,6 +216,7 @@ _run_retry() {
         fi
 
         rc=0
+        _LAST_CMD_ERROR=""
         if [[ "${VERBOSE:-false}" == true ]]; then
             "$@" || rc=$?
         else
@@ -225,9 +227,19 @@ _run_retry() {
             return 0
         fi
 
+        # Immediate abort on SIGINT / SIGTERM: do not waste retry loops when user interrupts
+        if [[ $rc -eq 130 || $rc -eq 143 ]]; then
+            return $rc
+        fi
+
         # Fatal non-retryable exit codes: 127 (not found), 126 (not executable)
         if [[ $rc -eq 127 || $rc -eq 126 ]]; then
             return $rc
+        fi
+
+        # Timeout handling (exit 124)
+        if [[ $rc -eq 124 && -z "${_LAST_CMD_ERROR:-}" ]]; then
+            _LAST_CMD_ERROR="Command timed out"
         fi
 
         # Fatal non-retryable HTTP status codes: 404 Not Found, 401 Unauthorized

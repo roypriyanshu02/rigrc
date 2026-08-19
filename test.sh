@@ -6,11 +6,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTS_DIR="$SCRIPT_DIR/tests"
-SETUP_SCRIPT="${SETUP_SCRIPT:-$SCRIPT_DIR/setup.sh}"
+SETUP_SCRIPT="${SETUP_SCRIPT:-$SCRIPT_DIR/rigrc.sh}"
 
-# Ensure setup.sh bundle exists before running tests
+# Ensure rigrc.sh bundle exists before running tests
 if [[ ! -f "$SETUP_SCRIPT" ]]; then
-    echo "setup.sh not found. Building standalone bundle..."
+    echo "rigrc.sh not found. Building standalone bundle..."
     "$SCRIPT_DIR/build.sh"
 fi
 

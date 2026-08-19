@@ -27,14 +27,14 @@ TMP_PAYLOAD="$(umask 077 && mktemp)"
 trap 'rm -f "$TMP_PAYLOAD"' EXIT INT TERM
 
 cd "$SCRIPT_DIR"
-asset_files=("default.conf" "packages")
+asset_files=("src/base.conf" "packages")
 [[ -f "wsl.conf" ]] && asset_files+=("wsl.conf")
 
 tar -czf "$TMP_PAYLOAD" --sort=name --owner=0 --group=0 --mtime='2026-01-01 00:00:00Z' \
     "${asset_files[@]}" 2>/dev/null \
     || tar -czf "$TMP_PAYLOAD" "${asset_files[@]}"
 
-read -r PAYLOAD_SHA _ < <(sha256sum "$TMP_PAYLOAD")
+read -r PAYLOAD_SHA _ < <(command -v sha256sum >/dev/null 2>&1 && sha256sum "$TMP_PAYLOAD" || shasum -a 256 "$TMP_PAYLOAD")
 
 # 3. Write Bundle Header with Integrity Checking & Asset Unpacker
 cat << EOF > "$OUTPUT_FILE"
@@ -51,29 +51,30 @@ _BUNDLE_WORKDIR=""
 _BUNDLE_EXPECTED_SHA="$PAYLOAD_SHA"
 
 _init_bundle_assets() {
-    # If running inside repo where packages/ and default.conf exist, use local files
+    # If running inside repo where packages/ and src/base.conf exist, use local files
     local cur_dir
     cur_dir="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-    if [[ -d "\$cur_dir/packages" && -f "\$cur_dir/default.conf" ]]; then
+    if [[ -d "\$cur_dir/packages" && -f "\$cur_dir/src/base.conf" ]]; then
         SCRIPT_DIR="\${SCRIPT_DIR:-\$cur_dir}"
         PACKAGES_DIR="\${PACKAGES_DIR:-\$cur_dir/packages}"
         GROUPS_CONF="\${GROUPS_CONF:-\$PACKAGES_DIR/_groups.conf}"
         return 0
     fi
 
-    # Extract embedded payload to temp directory with integrity validation
-    _BUNDLE_WORKDIR="\$(mktemp -d)"
-    local tmp_payload="\$_BUNDLE_WORKDIR/payload.tar.gz"
+    # Extract bundled asset payload into secure temp directory
+    _BUNDLE_WORKDIR="\$(mktemp -d -t rigrc_assets_XXXXXX)"
+    chmod 700 "\$_BUNDLE_WORKDIR"
 
-    sed '1,/^__PAYLOAD_BEGIN__\$/d' "\$0" | base64 -d > "\$tmp_payload" 2>/dev/null || {
+    local payload_archive="\$_BUNDLE_WORKDIR/payload.tar.gz"
+    sed '1,/^__PAYLOAD_BEGIN__\$/d' "\$0" | (base64 -d 2>/dev/null || base64 -D 2>/dev/null) > "\$payload_archive" 2>/dev/null || {
         printf 'Error: Failed to decode bundle payload.\n' >&2
         rm -rf "\$_BUNDLE_WORKDIR"
         exit 1
     }
 
-    if command -v sha256sum >/dev/null 2>&1; then
+    if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
         local actual_sha
-        read -r actual_sha _ < <(sha256sum "\$tmp_payload")
+        read -r actual_sha _ < <(command -v sha256sum >/dev/null 2>&1 && sha256sum "\$payload_archive" || shasum -a 256 "\$payload_archive")
         if [[ -n "\$_BUNDLE_EXPECTED_SHA" && "\$actual_sha" != "\$_BUNDLE_EXPECTED_SHA" ]]; then
             printf 'Error: Checksum mismatch. The bundle payload may be corrupted.\n' >&2
             rm -rf "\$_BUNDLE_WORKDIR"
@@ -81,12 +82,12 @@ _init_bundle_assets() {
         fi
     fi
 
-    tar -xzf "\$tmp_payload" -C "\$_BUNDLE_WORKDIR" 2>/dev/null || {
+    tar -xzf "\$payload_archive" -C "\$_BUNDLE_WORKDIR" 2>/dev/null || {
         printf 'Error: Failed to extract bundle payload.\n' >&2
         rm -rf "\$_BUNDLE_WORKDIR"
         exit 1
     }
-    rm -f "\$tmp_payload"
+    rm -f "\$payload_archive"
 
     SCRIPT_DIR="\$_BUNDLE_WORKDIR"
     PACKAGES_DIR="\$_BUNDLE_WORKDIR/packages"

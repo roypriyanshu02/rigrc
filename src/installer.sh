@@ -79,11 +79,54 @@ _wait_for_pm_lock() {
         pacman)
             local db_lock="/var/lib/pacman/db.lck"
             while [[ $waited -lt $max_wait && -f "$db_lock" ]]; do
+                if command -v pgrep >/dev/null 2>&1 && ! pgrep -x pacman >/dev/null 2>&1; then
+                    log_warn "Stale pacman lock file detected ($db_lock with no active pacman process). Proceeding."
+                    return 0
+                fi
                 if [[ $waited -eq 0 ]]; then
                     log_warn "Waiting for pacman lock ($db_lock) to release..."
                 fi
                 sleep 2
                 waited=$(( waited + 2 ))
+            done
+            ;;
+        dnf)
+            local dnf_locks=("/var/run/dnf.pid" "/var/lib/dnf/lock")
+            while [[ $waited -lt $max_wait ]]; do
+                local d_locked=false dlf
+                for dlf in "${dnf_locks[@]}"; do
+                    if _is_file_locked "$dlf"; then
+                        d_locked=true; break
+                    fi
+                done
+                [[ "$d_locked" == false ]] && return 0
+                [[ $waited -eq 0 ]] && log_warn "Waiting for dnf lock to release..."
+                sleep 2
+                waited=$(( waited + 2 ))
+            done
+            ;;
+        apk)
+            local apk_lock="/lib/apk/db/lock"
+            while [[ $waited -lt $max_wait && -f "$apk_lock" ]]; do
+                if _is_file_locked "$apk_lock"; then
+                    [[ $waited -eq 0 ]] && log_warn "Waiting for apk lock to release..."
+                    sleep 2
+                    waited=$(( waited + 2 ))
+                else
+                    break
+                fi
+            done
+            ;;
+        zypper)
+            local zyp_lock="/var/run/zypp.pid"
+            while [[ $waited -lt $max_wait && -f "$zyp_lock" ]]; do
+                if _is_file_locked "$zyp_lock"; then
+                    [[ $waited -eq 0 ]] && log_warn "Waiting for zypper lock to release..."
+                    sleep 2
+                    waited=$(( waited + 2 ))
+                else
+                    break
+                fi
             done
             ;;
     esac
@@ -121,7 +164,12 @@ _run_script() {
     fi
     local runner=()
     command -v timeout >/dev/null 2>&1 && runner=(timeout "${timeout_val}")
-    _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "$label" "${runner[@]}" bash -c "set -o pipefail; $raw_cmd"
+    local s_rc=0
+    _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "$label" "${runner[@]}" bash -c "set -o pipefail; $raw_cmd" || s_rc=$?
+    if [[ $s_rc -eq 124 && -z "${_LAST_CMD_ERROR:-}" ]]; then
+        _LAST_CMD_ERROR="Command timed out after ${timeout_val}s"
+    fi
+    return $s_rc
 }
 
 
@@ -169,86 +217,6 @@ _upgrade_system() {
     esac
 }
 
-# Flush the accumulated native package queue and install in one PM call.
-_flush_native_q() {
-    [[ ${#_NATIVE_Q[@]} -eq 0 ]] && return
-    local SPINNER_INDENT="    "
-
-    if [[ "$_PM" == unknown ]]; then
-        printf '    %s %s\n' "${CLR_ERROR}${BOLD}${SYM_FAIL}${RESET}" "No package manager found. Cannot install: ${_NATIVE_Q[*]}" >&2
-        _NATIVE_Q=(); return
-    fi
-
-    local -a update_cmd=() install_cmd=()
-    case "$_PM" in
-        apt|apt-get)
-            update_cmd=(_sudo apt update -qq)
-            install_cmd=(_sudo apt install -y -qq) ;;
-        dnf)     install_cmd=(_sudo dnf install -y) ;;
-        pacman)  install_cmd=(_sudo pacman -Sy --noconfirm) ;;
-        zypper)  install_cmd=(_sudo zypper install -y) ;;
-        apk)     install_cmd=(_sudo apk add --no-cache) ;;
-    esac
-
-    if [[ "$DRY_RUN" == true ]]; then
-        printf '    %s %s\n' "${CLR_WARN}${BOLD}[DRY-RUN]${RESET}" "Would install (${_PM}): ${_NATIVE_Q[*]}" >&2
-    else
-        _wait_for_pm_lock "$_PM"
-        if [[ ${#update_cmd[@]} -gt 0 ]]; then
-            "${update_cmd[@]}" >/dev/null 2>&1 || true
-        fi
-        local q_label="Installing ${#_NATIVE_Q[@]} packages via ${_PM}"
-        [[ ${#_NATIVE_Q[@]} -eq 1 ]] && q_label="Installing '${_NATIVE_Q[0]}' via ${_PM}"
-
-        if ! _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "$q_label" "${install_cmd[@]}" "${_NATIVE_Q[@]}"; then
-            printf '    %s %s\n' "${CLR_WARN}${SYM_WARN}${RESET}" "Batch install (${_PM}) failed. Retrying packages individually..." >&2
-            local p
-            for p in "${_NATIVE_Q[@]}"; do
-                _wait_for_pm_lock "$_PM"
-                _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "Installing '${p}' via ${_PM}" "${install_cmd[@]}" "$p" || {
-                    printf '    %s %s\n' "${CLR_WARN}${SYM_WARN}${RESET}" "Failed to install '${p}' via ${_PM}." >&2
-                    _FAILED_PACKAGES+=("$p")
-                    _FAILURE_REASONS["$p"]="${_LAST_CMD_ERROR:-Package install failed via ${_PM}}"
-                }
-            done
-        fi
-    fi
-    _NATIVE_Q=()
-}
-
-# Flush native and script installation queues for the current package group.
-_flush_group_installs() {
-    _flush_native_q
-
-    local i
-    for i in "${!_FALLBACK_NAMES[@]}"; do
-        if ! _check_bins "${_FALLBACK_BINS[$i]}"; then
-            printf '    %s %s\n' "${CLR_WARN}${SYM_WARN}${RESET}" "'${_FALLBACK_NAMES[$i]}' not found after package install. Using script fallback." >&2
-            _SCRIPT_NAMES+=("${_FALLBACK_NAMES[$i]}")
-            _SCRIPT_CMDS+=("${_FALLBACK_CMDS[$i]}")
-        fi
-    done
-    _FALLBACK_NAMES=(); _FALLBACK_BINS=(); _FALLBACK_CMDS=()
-
-    for i in "${!_SCRIPT_NAMES[@]}"; do
-        if [[ "$DRY_RUN" == true ]]; then
-            log_action "Would install via script: ${_SCRIPT_NAMES[$i]}"
-        else
-            _run_script "${_SCRIPT_CMDS[$i]}" "Installing '${_SCRIPT_NAMES[$i]}' via script" || log_warn "Failed to install '${_SCRIPT_NAMES[$i]}' via script."
-        fi
-    done
-    _SCRIPT_NAMES=(); _SCRIPT_CMDS=()
-
-    for i in "${!_POST_CMDS[@]}"; do
-        if [[ "$DRY_RUN" == true ]]; then
-            log_action "Would run post-install hook: ${_POST_CMDS[$i]}"
-        else
-            bash -c "${_POST_CMDS[$i]}" >/dev/null 2>&1 || log_warn "Post-install hook failed for '${_POST_NAMES[$i]:-script}'."
-        fi
-    done
-    _POST_CMDS=(); _POST_NAMES=()
-}
-
 _find_pkg_manifest() {
     local target="$1"
     local pdir="${PACKAGES_DIR:-$SCRIPT_DIR/packages}"
@@ -268,6 +236,12 @@ _resolve_missing_dependency() {
 
     if _check_bins_scoped "$dep" "any"; then
         return 0
+    fi
+
+    if [[ "${_DEP_RESOLVE_STACK["$dep"]:-0}" -eq 1 ]]; then
+        log_warn "Circular dependency detected resolving '${dep}' for '${parent_pkg}'. Skipping."
+        _CONF_PKG_DECLINED["$parent_pkg"]=1
+        return 1
     fi
 
     local dep_conf
@@ -296,7 +270,9 @@ _resolve_missing_dependency() {
         log_info "Installing missing prerequisite '${dep}' for '${parent_pkg}'..."
         _CONF_PKG_DECLINED["$dep"]=0
         _CONF_PKG_DISABLED["$dep"]=0
+        _DEP_RESOLVE_STACK["$dep"]=1
         _install_single_package "$dep_conf" "$dep"
+        _DEP_RESOLVE_STACK["$dep"]=0
         if _check_bins_scoped "$dep" "any"; then
             return 0
         else
@@ -345,7 +321,7 @@ _install_single_package() {
         if [[ -n "$mise_spec" ]]; then
             provider="mise"
             [[ "$mise_spec" != *":"* && "$mise_spec" == *"/"* ]] && mise_spec="github:${mise_spec}"
-            scmd="~/.local/bin/mise use -g ${mise_spec}"
+            scmd="command -v mise >/dev/null 2>&1 && mise use -g ${mise_spec} || \"\$HOME/.local/bin/mise\" use -g ${mise_spec}"
         elif [[ -n "$uv_spec" ]]; then
             provider="uv"
             scmd="\"${HOME}/.local/bin/uv\" tool install ${uv_spec} 2>/dev/null || uv tool install ${uv_spec}"
@@ -413,9 +389,13 @@ _install_single_package() {
         [[ -z "$prep_cmd" ]] && prep_cmd="$(_get_opt prep "$rest")"
         if [[ -n "$prep_cmd" ]]; then
             if [[ "$DRY_RUN" == true ]]; then
-                log_action "    prep: $prep_cmd"
+                [[ "$VERBOSE" == true ]] && log_action "    prep: $prep_cmd"
             else
-                SPINNER_INDENT="      " _run_script "$prep_cmd" "prep: $prep_cmd" || log_warn "Prep hook failed for '$pkg_id'."
+                if [[ "$VERBOSE" == true ]]; then
+                    SPINNER_INDENT="      " _run_script "$prep_cmd" "prep: $prep_cmd" || log_warn "Prep hook failed for '$pkg_id'."
+                else
+                    bash -c "$prep_cmd" >/dev/null 2>&1 || log_warn "Prep hook failed for '$pkg_id'."
+                fi
             fi
         fi
 
@@ -503,9 +483,13 @@ _install_single_package() {
             [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt post "$rest")"
             if [[ -n "$post_cmd" ]]; then
                 if [[ "$DRY_RUN" == true ]]; then
-                    log_action "    post: $post_cmd"
+                    [[ "$VERBOSE" == true ]] && log_action "    post: $post_cmd"
                 else
-                    SPINNER_INDENT="      " _run_script "$post_cmd" "post: $post_cmd" || log_warn "Post hook failed for '$pkg_id'."
+                    if [[ "$VERBOSE" == true ]]; then
+                        SPINNER_INDENT="      " _run_script "$post_cmd" "post: $post_cmd" || log_warn "Post hook failed for '$pkg_id'."
+                    else
+                        bash -c "$post_cmd" >/dev/null 2>&1 || log_warn "Post hook failed for '$pkg_id'."
+                    fi
                 fi
             fi
 
@@ -514,16 +498,21 @@ _install_single_package() {
         fi
 
         # Post-install scope monitoring & verification
-        if [[ "$DRY_RUN" != true && "$install_success" == true ]]; then
-            hash -r 2>/dev/null || true
-            if ! _check_bins_scoped "$bin" "$scope" && [[ "$scope" != "script" ]]; then
-                log_warn "'${pkg_id}' binary not found in ${scope} PATH after installation."
-                _FAILED_PACKAGES+=("$pkg_id")
-                _FAILURE_REASONS["$pkg_id"]="${_LAST_CMD_ERROR:-Binary not found in ${scope} PATH}"
-                _CONF_PKG_DECLINED["$pkg_id"]=1
+        if [[ "$install_success" == true ]]; then
+            _INSTALLED_PACKAGES_COUNT=$((_INSTALLED_PACKAGES_COUNT + 1))
+            if [[ "$DRY_RUN" != true ]]; then
+                hash -r 2>/dev/null || true
+                if ! _check_bins_scoped "$bin" "$scope" && [[ "$scope" != "script" ]]; then
+                    log_warn "'${pkg_id}' binary not found in ${scope} PATH after installation."
+                    _FAILED_PACKAGES+=("$pkg_id")
+                    _FAILURE_REASONS["$pkg_id"]="Binary not found in ${scope} PATH"
+                    _CONF_PKG_DECLINED["$pkg_id"]=1
+                    _INSTALLED_PACKAGES_COUNT=$((_INSTALLED_PACKAGES_COUNT - 1))
+                fi
             fi
         fi
     else
+        _INSTALLED_PACKAGES_COUNT=$((_INSTALLED_PACKAGES_COUNT + 1))
         log_success "$pkg_id"
         # Deploy templates and configs for this package
         LOG_INDENT="      " SPINNER_INDENT="      " deploy_package_templates "$conf_file"

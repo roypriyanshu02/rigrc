@@ -1,3 +1,5 @@
+.PHONY: all build test lint fmt fmt-check check clean
+
 all: build
 
 build:

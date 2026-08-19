@@ -6,15 +6,15 @@
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
-SETUP_SCRIPT="${SETUP_SCRIPT:-$REPO_ROOT/setup.sh}"
+SETUP_SCRIPT="${SETUP_SCRIPT:-$REPO_ROOT/rigrc.sh}"
 
 # Test tracking counters
 PASSED_COUNT=0
 FAILED_COUNT=0
 
-# Ensure setup.sh bundle exists
+# Ensure rigrc.sh bundle exists
 if [[ ! -f "$SETUP_SCRIPT" ]]; then
-    echo "setup.sh not found. Compiling standalone bundle..."
+    echo "rigrc.sh not found. Compiling standalone bundle..."
     "$REPO_ROOT/build.sh"
 fi
 
@@ -111,10 +111,12 @@ reset_test_state() {
     _CONF_TMPL_BUF=()
     _CONF_TMPL_DIS=()
     _CONF_CASCADE_DONE=0
-    _NATIVE_Q=()
+    _WARNING_MESSAGES=()
+    _DEP_RESOLVE_STACK=()
+    _INSTALLED_PACKAGES_COUNT=0
     _SYS_ARCH_CACHE=""
     _SYS_DISTRO_CACHE=""
-    _SYS_PROFILE_CACHE=""
+    _SYS_ENV_CACHE=""
     _SYS_IS_WSL_CACHE=""
     _SYS_IS_CONTAINER_CACHE=""
     DRY_RUN=false

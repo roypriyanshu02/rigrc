@@ -25,7 +25,7 @@ _format_manifest() {
     for cfg in "${targets[@]}"; do
         [[ -f "$cfg" ]] || continue
         local tmp_cfg
-        tmp_cfg="$(mktemp "${cfg}.XXXXXX")"
+        tmp_cfg="$(umask 077 && mktemp "${cfg}.XXXXXX")"
         _TRACKED_TMP_FILES+=("$tmp_cfg")
         sed 's/[[:space:]]*$//' "$cfg" > "$tmp_cfg"
         [[ -n "$(tail -c 1 "$tmp_cfg" 2>/dev/null)" ]] && echo "" >> "$tmp_cfg"
@@ -154,7 +154,7 @@ _lint_manifest() {
     fi
 
     if ! _format_manifest "$GROUPS_CONF" --check-only; then
-        log_warn "Configuration files need formatting. Run './setup.sh --format' to fix."
+        log_warn "Configuration files need formatting. Run './rigrc.sh --format' to fix."
         errors=$((errors + 1))
     fi
 
@@ -215,16 +215,21 @@ _doctor_check() {
         local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
         local -a gh_auth=()
         [[ -n "$token" ]] && gh_auth=(-H "Authorization: Bearer $token")
-        local gh_hdrs
-        gh_hdrs="$(curl --proto '=https' --tlsv1.2 -sSI --connect-timeout 3 --max-time 5 "${gh_auth[@]}" https://api.github.com/rate_limit 2>/dev/null || true)"
-        if [[ -n "$gh_hdrs" ]]; then
-            local rem_limit=""
-            if [[ "$gh_hdrs" =~ x-ratelimit-remaining:[[:space:]]*([0-9]+) ]]; then
+        local gh_resp
+        gh_resp="$(curl --proto '=https' --tlsv1.2 -sSL -i --connect-timeout 3 --max-time 5 "${gh_auth[@]}" https://api.github.com/rate_limit 2>/dev/null || true)"
+        if [[ -n "$gh_resp" ]]; then
+            local rem_limit="" total_limit=""
+            if [[ "$gh_resp" =~ [Xx]-[Rr]atelimit-[Rr]emaining:[[:space:]]*([0-9]+) ]]; then
                 rem_limit="${BASH_REMATCH[1]}"
             fi
+            if [[ "$gh_resp" =~ [Xx]-[Rr]atelimit-[Ll]imit:[[:space:]]*([0-9]+) ]]; then
+                total_limit="${BASH_REMATCH[1]}"
+            fi
             if [[ -n "$rem_limit" ]]; then
+                local limit_info="${rem_limit}"
+                [[ -n "$total_limit" ]] && limit_info="${rem_limit}/${total_limit}"
                 if [[ "$rem_limit" -gt 0 ]]; then
-                    log_success "GitHub API reachable (Rate limit remaining: ${rem_limit})"
+                    log_success "GitHub API reachable (Rate limit remaining: ${limit_info})"
                 else
                     log_warn "GitHub API rate limit exhausted (0 remaining). Set GITHUB_TOKEN to resolve."
                     warnings=$((warnings + 1))
@@ -284,7 +289,7 @@ _doctor_check() {
             for link in "${broken_links[@]}"; do
                 printf "    %s %s\n" "${CLR_MUTED}•${RESET}" "$link"
             done
-            log_info "Run './setup.sh --doctor --fix' or './setup.sh --clean-symlinks' to remove them."
+            log_info "Run './rigrc.sh --doctor --fix' or './rigrc.sh --clean-symlinks' to remove them."
             warnings=$((warnings + 1))
         fi
     fi
@@ -367,10 +372,17 @@ _export_diagnostics() {
   "arch": "${arch}",
   "package_manager": "${pm}",
   "conditions": "${conds}",
-  "profile": "$(_get_profile)",
+  "environment": "$(_get_env)",
   "bash_version": "${BASH_VERSION}",
   "failed_packages": [
-$(local i=0; for fp in "${_FAILED_PACKAGES[@]}"; do [[ $i -gt 0 ]] && printf ',\n'; printf '    {"package": "%s", "reason": "%s"}' "$fp" "${_FAILURE_REASONS["$fp"]:-unknown}"; i=$((i+1)); done)
+$(local i=0; for fp in "${_FAILED_PACKAGES[@]}"; do
+    local r="${_FAILURE_REASONS["$fp"]:-unknown}"
+    r="${r//\\/\\\\}"; r="${r//\"/\\\"}"; r="${r//$'\n'/ }"
+    local fp_esc="${fp//\\/\\\\}"; fp_esc="${fp_esc//\"/\\\"}"
+    [[ $i -gt 0 ]] && printf ',\n'
+    printf '    {"package": "%s", "reason": "%s"}' "$fp_esc" "$r"
+    i=$((i+1))
+  done)
   ]
 }
 EOF

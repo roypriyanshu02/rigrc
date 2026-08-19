@@ -42,8 +42,8 @@ _is_wsl() {
 # Returns 0 inside Docker/OCI container, 1 otherwise.
 _is_container() {
     if [[ -z "${_SYS_IS_CONTAINER_CACHE:-}" ]]; then
-        if [[ -f /.dockerenv || -f /run/.containerenv ]] \
-        || grep -qE '(docker|containerd|kubepods)' /proc/1/cgroup 2>/dev/null \
+        if [[ -f /.dockerenv || -f /run/.containerenv || -f /run/systemd/container ]] \
+        || grep -qE '(docker|containerd|kubepods|lxc)' /proc/1/cgroup /proc/self/cgroup 2>/dev/null \
         || { command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --container >/dev/null 2>&1; }; then
             _SYS_IS_CONTAINER_CACHE=0
         else
@@ -53,23 +53,23 @@ _is_container() {
     return "$_SYS_IS_CONTAINER_CACHE"
 }
 
-# Detect system profile
-_get_profile() {
-    if [[ -z "${_SYS_PROFILE_CACHE:-}" ]]; then
-        if [[ -n "${PROFILE:-}" ]]; then
-            _SYS_PROFILE_CACHE="$PROFILE"
+# Detect system environment
+_get_env() {
+    if [[ -z "${_SYS_ENV_CACHE:-}" ]]; then
+        if [[ -n "${ENV:-}" ]]; then
+            _SYS_ENV_CACHE="$ENV"
         elif _is_wsl; then
-            _SYS_PROFILE_CACHE="wsl"
+            _SYS_ENV_CACHE="wsl"
         elif [[ -f /etc/cloud/cloud.cfg || -f /etc/digitalocean || -d /etc/oracle-cloud-agent ]] \
              || { command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --vm >/dev/null 2>&1; } \
              || [[ -n "${SSH_CLIENT:-}" || -n "${SSH_TTY:-}" || -n "${SSH_CONNECTION:-}" ]] \
              || { ! command -v xset >/dev/null 2>&1 && [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; }; then
-            _SYS_PROFILE_CACHE="vps"
+            _SYS_ENV_CACHE="vps"
         else
-            _SYS_PROFILE_CACHE="desktop"
+            _SYS_ENV_CACHE="desktop"
         fi
     fi
-    printf '%s' "$_SYS_PROFILE_CACHE"
+    printf '%s' "$_SYS_ENV_CACHE"
 }
 
 # Detect system distribution name.
@@ -96,8 +96,8 @@ _get_detected_conds() {
         printf 'wsl'
     elif _is_container; then
         printf 'container'
-    elif [[ "$(_get_profile)" != "default" && -n "$(_get_profile)" ]]; then
-        printf '%s' "$(_get_profile)"
+    elif [[ "$(_get_env)" != "default" && -n "$(_get_env)" ]]; then
+        printf '%s' "$(_get_env)"
     else
         local os
         os="$(uname -s 2>/dev/null || echo "linux")"
@@ -263,7 +263,7 @@ _check_disk_space() {
     [[ "${DRY_RUN:-false}" == true ]] && return 0
     if command -v df >/dev/null 2>&1; then
         local avail_kb
-        avail_kb="$(df -k "$path" 2>/dev/null | awk 'NR==2 {print $4}')"
+        avail_kb="$(df -kP "$path" 2>/dev/null | awk 'NR==2 {print $4}')"
         if [[ -n "$avail_kb" && "$avail_kb" =~ ^[0-9]+$ ]]; then
             local avail_mb=$(( avail_kb / 1024 ))
             if [[ $avail_mb -lt $min_mb ]]; then

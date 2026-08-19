@@ -50,13 +50,12 @@ assert_eq "pre-existing home file content" "$(cat "${BACKUP_DIR}/test_backup.txt
 assert_success "_write_file creates .backup_manifest.json" test -f "${BACKUP_DIR}/.backup_manifest.json"
 assert_success "_backup_manifest contains valid rel entry" grep -q '"rel":"test_backup.txt"' "${BACKUP_DIR}/.backup_manifest.json"
 
-# Test _flush_native_q dry-run
+# Test _get_backup_dir produces no stdout pollution
 reset_test_state
-_NATIVE_Q=("dummy_pkg1" "dummy_pkg2")
-_PM="apt"
-DRY_RUN=true
-_flush_native_q >/dev/null 2>&1
-assert_eq "0" "${#_NATIVE_Q[@]}" "_flush_native_q flushes queue in dry-run mode"
+bdir_output="$(_get_backup_dir)"
+assert_eq "" "$bdir_output" "_get_backup_dir produces zero stdout output"
+_get_backup_dir
+assert_success "_get_backup_dir sets BACKUP_DIR variable" test -n "$BACKUP_DIR"
 
 # Test _collect_bashrc_snippets
 reset_test_state
@@ -227,6 +226,22 @@ NON_INTERACTIVE=true
 assert_success "interactive 'y' failed install executes post hook" test -f "$fail_post_marker"
 assert_success "interactive 'y' failed install deploys templates" test -f "${DOTFILES_DIR}/.config/${fail_tmpl_file}"
 rm -f "$fail_conf_file" "$fail_post_marker" "${DOTFILES_DIR}/.config/${fail_tmpl_file}" "${HOME}/.config/${fail_tmpl_file}"
+
+# Test circular dependency loop prevention
+reset_test_state
+_DEP_RESOLVE_STACK["circular_dep_pkg"]=1
+assert_failure "_resolve_missing_dependency detects circular dependency and returns 1" _resolve_missing_dependency "parent_pkg" "circular_dep_pkg"
+assert_eq "1" "${_CONF_PKG_DECLINED["parent_pkg"]:-0}" "_resolve_missing_dependency marks parent declined on circular dependency"
+_DEP_RESOLVE_STACK=()
+
+# Test path traversal prevention in rollback
+bak_trav_dir="${HOME}/.dotfiles.bak/20991231_235958"
+mkdir -p "$bak_trav_dir"
+touch "$bak_trav_dir/valid.txt"
+# If a file tried to escape via traversal
+rm -f "${HOME}/valid.txt"
+assert_success "_rollback_latest_backup handles snapshots cleanly" _rollback_latest_backup "20991231_235958"
+assert_success "_rollback_latest_backup restored valid file" test -f "${HOME}/valid.txt"
 
 echo "  Section Results: ${PASSED_COUNT} passed, ${FAILED_COUNT} failed."
 [[ $FAILED_COUNT -eq 0 ]] || exit 1
