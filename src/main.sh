@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # =============================================================================
-#  CLI & MAIN ORCHESTRATOR
+#  SCRIPT & MAIN ORCHESTRATOR
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -9,12 +9,16 @@
 _show_help() {
     printf '%s\n' "${CLR_PRIMARY}${BOLD}Dotfiles Setup${RESET}"
     printf '\n%s\n' "${BOLD}USAGE${RESET}"
-    printf '    ./setup.sh %s[OPTIONS]%s\n' "${CLR_ACCENT}" "${RESET}"
+    printf '    ./rigrc.sh %s[OPTIONS]%s\n' "${CLR_ACCENT}" "${RESET}"
     printf '\n%s\n' "${BOLD}OPTIONS${RESET}"
     printf '    %s %-30s %s\n' \
         "${CLR_PRIMARY}•${RESET}" '-c, --config <file>'        'Load configuration file' \
+        "${CLR_PRIMARY}•${RESET}" '-y, --non-interactive'      'Run in automated non-interactive mode' \
         "${CLR_PRIMARY}•${RESET}" '-v, --verbose'               'Show verbose command output' \
         "${CLR_PRIMARY}•${RESET}" '-f, --force, --reset'        'Overwrite existing files and bypass locks' \
+        "${CLR_PRIMARY}•${RESET}" '    --env <environment>'     'Override detected environment (wsl, vps, desktop)' \
+        "${CLR_PRIMARY}•${RESET}" '    --skip-upgrade'          'Skip system package manager update and upgrade' \
+        "${CLR_PRIMARY}•${RESET}" '    --offline'               'Skip network checks and online package downloads' \
         "${CLR_PRIMARY}•${RESET}" '    --verify-scripts'        'Prompt before running installation scripts' \
         "${CLR_PRIMARY}•${RESET}" '    --list'                  'List available packages by group' \
         "${CLR_PRIMARY}•${RESET}" '    --fmt, --format'         'Format configuration and manifest files' \
@@ -26,20 +30,19 @@ _show_help() {
         "${CLR_PRIMARY}•${RESET}" '-h, --help'                  'Show help'
     printf '\n%s\n' "${BOLD}EXAMPLES${RESET}"
     printf '    %s %s\n' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh --config work.conf' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh --rollback' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh --doctor --fix' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh --export-diagnostics' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh --fmt' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh --lint' \
-        "${CLR_MUTED}\$${RESET}" './setup.sh --clean-symlinks'
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh' \
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh --config work.conf' \
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh --rollback' \
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh --doctor --fix' \
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh --export-diagnostics' \
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh --fmt' \
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh --lint' \
+        "${CLR_MUTED}\$${RESET}" './rigrc.sh --clean-symlinks'
     printf '\n%s\n' "${BOLD}FILES${RESET}"
     printf '    %-24s %s\n' \
         'packages/'               'Package definitions and configuration templates' \
         'packages/_groups.conf'   'Package group definitions' \
-        'default.conf'            'Base settings and shell templates' \
-        'example.conf'            'Example custom configuration file'
+        'src/base.conf'           'Base settings and shell templates'
     exit 0
 }
 
@@ -63,7 +66,7 @@ _list_all() {
 }
 
 # ---------------------------------------------------------------------------
-# CLI argument parser
+# Script argument parser
 # ---------------------------------------------------------------------------
 _parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -74,8 +77,8 @@ _parse_args() {
             -v|--verbose)                         VERBOSE=true; shift ;;
             -f|--force|--reset)                   FORCE=true; shift ;;
             --verify-scripts)                     VERIFY_SCRIPTS=true; shift ;;
-            --profile=*)                          PROFILE="${1#*=}"; CLI_EXPLICIT_GROUPS=true; shift ;;
-            --profile)                            PROFILE="$2"; CLI_EXPLICIT_GROUPS=true; shift 2 ;;
+            --env=*|--environment=*)             ENV="${1#*=}"; shift ;;
+            --env|--environment)                 ENV="$2"; shift 2 ;;
             --offline)                            OFFLINE=true; shift ;;
             -y|--non-interactive)                 NON_INTERACTIVE=true; shift ;;
             --list|--list-groups|--list-packages) _list_all ;;
@@ -101,7 +104,7 @@ _parse_args() {
                 ;;
             -h|--help) _show_help ;;
             --) shift; break ;;
-            -*) log_error "Unknown option '$1'. Run './setup.sh --help' for usage."; exit 1 ;;
+            -*) log_error "Unknown option '$1'. Run './rigrc.sh --help' for usage."; exit 1 ;;
             *)  break ;;
         esac
     done
@@ -126,8 +129,8 @@ _main() {
         printf '\nDotfiles Setup v2.0\n' >&2
     fi
 
-    # ── Phase 1: Preflight & Environment ──
-    _ui_phase 1 6 "Preflight & System Environment"
+    # ── Phase 1: Preflight ──
+    _ui_phase 1 6 "Preflight"
     _check_disk_space 500 "$HOME" || exit 1
 
     local net_status="online"
@@ -137,16 +140,16 @@ _main() {
     printf '  %s (%s) · %s · %s · %s\n' "$distro" "$arch" "$pm" "$conds" "$net_status"
     [[ "$net_status" == "offline/limited" ]] && log_warn "Network appears offline or limited. Online downloads may fail."
 
-    # ── Phase 2: Configuration Profile & Manifests ──
-    _ui_phase 2 6 "Configuration Profile & Manifests"
+    # ── Phase 2: Configuration ──
+    _ui_phase 2 6 "Configuration"
     _preload_all_manifests "$PACKAGES_DIR"
 
-    local cfg_name="default.conf"
+    local cfg_name="base (built-in)"
     [[ -n "${CONFIG_FILE:-}" ]] && cfg_name="$(basename "$CONFIG_FILE")"
     printf '  Loaded configuration: %s\n' "${BOLD}${cfg_name}${RESET}"
 
-    # ── Phase 3: Identity & Privilege Acquisition ──
-    _ui_phase 3 6 "Identity & Privilege Acquisition"
+    # ── Phase 3: Identity ──
+    _ui_phase 3 6 "Identity"
     _PM="$(_detect_pm)"
     _acquire_sudo "$_PM"
 
@@ -158,14 +161,14 @@ _main() {
     CUR_NAME="$(git config --global user.name 2>/dev/null || true)"
     if [[ -n "${GIT_USER_NAME:-}" ]]; then
         FINAL_NAME="$GIT_USER_NAME"
-        printf '  %-12s %s\n' "user.name" "$FINAL_NAME"
+        printf '  %-24s %s\n' "Git user name" "$FINAL_NAME"
     elif [[ "$DRY_RUN" == false && "${NON_INTERACTIVE:-false}" == false && ( -t 0 || -t 1 || -c /dev/tty ) ]]; then
-        FINAL_NAME="$(_ui_input "user.name" "$CUR_NAME")"
+        FINAL_NAME="$(_ui_input "Git user name (optional)" "$CUR_NAME")"
     elif [[ -n "$CUR_NAME" ]]; then
         FINAL_NAME="$CUR_NAME"
-        printf '  %-12s %s\n' "user.name" "$FINAL_NAME"
+        printf '  %-24s %s\n' "Git user name" "$FINAL_NAME"
     else
-        printf '  %-12s %s\n' "user.name" "${CLR_MUTED}(skipped)${RESET}"
+        printf '  %-24s %s\n' "Git user name" "${CLR_MUTED}(skipped)${RESET}"
     fi
 
     local FINAL_EMAIL=""
@@ -176,10 +179,10 @@ _main() {
         _validate_email "$GIT_EMAIL" \
             || { log_error "Invalid GIT_EMAIL format in config: '$GIT_EMAIL'. Expected name@example.com."; exit 1; }
         FINAL_EMAIL="$GIT_EMAIL"
-        printf '  %-12s %s\n' "user.email" "$FINAL_EMAIL"
+        printf '  %-24s %s\n' "Git email" "$FINAL_EMAIL"
     elif [[ "$DRY_RUN" == false && "${NON_INTERACTIVE:-false}" == false && ( -t 0 || -t 1 || -c /dev/tty ) ]]; then
         local git_input
-        git_input="$(_ui_input "user.email" "$CUR_EMAIL")"
+        git_input="$(_ui_input "Git email (optional)" "$CUR_EMAIL")"
         if [[ -n "$git_input" ]]; then
             if _validate_email "$git_input"; then
                 FINAL_EMAIL="$git_input"
@@ -189,25 +192,25 @@ _main() {
         fi
     elif [[ -n "$CUR_EMAIL" ]]; then
         FINAL_EMAIL="$CUR_EMAIL"
-        printf '  %-12s %s\n' "user.email" "$FINAL_EMAIL"
+        printf '  %-24s %s\n' "Git email" "$FINAL_EMAIL"
     else
-        printf '  %-12s %s\n' "user.email" "${CLR_MUTED}(skipped)${RESET}"
+        printf '  %-24s %s\n' "Git email" "${CLR_MUTED}(skipped)${RESET}"
     fi
 
-    # ── Phase 4: System Package Updates & Upgrades ──
-    _ui_phase 4 6 "System Package Updates & Upgrades"
+    # ── Phase 4: System Packages ──
+    _ui_phase 4 6 "System Packages"
     _upgrade_system
 
-    # ── Phase 5: Package Installation & Life-cycle Management ──
-    _ui_phase 5 6 "Package Installation & Life-cycle Management"
+    # ── Phase 5: Packages ──
+    _ui_phase 5 6 "Packages"
     if [[ -d "$PACKAGES_DIR" ]]; then
         install_packages "$PACKAGES_DIR"
     else
         log_warn "Packages directory not found. Skipping package installation."
     fi
 
-    # ── Phase 6: Template Deployment & Symlink Integration ──
-    _ui_phase 6 6 "Template Deployment & Symlink Integration"
+    # ── Phase 6: Dotfiles ──
+    _ui_phase 6 6 "Dotfiles"
 
     local _prof_tmpl="${_CONF_TMPL_BUF[".profile"]:-${_CONF_TMPL_BUF["profile"]:-}}"
     local _bprof_tmpl="${_CONF_TMPL_BUF[".bash_profile"]:-${_CONF_TMPL_BUF["bash_profile"]:-}}"
@@ -284,5 +287,5 @@ _main() {
     fi
 
     local total_elapsed=$(( SECONDS - start_time ))
-    _ui_render_summary "$total_elapsed" "${#_CONF_PARSED[@]}" "${BACKUP_COUNT:-0}"
+    _ui_render_summary "$total_elapsed" "${_INSTALLED_PACKAGES_COUNT:-0}" "${BACKUP_COUNT:-0}"
 }

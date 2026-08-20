@@ -1,4 +1,20 @@
+# Build & distribution artifacts
+rigrc.sh
+dist/
+RELEASE_NOTES.md
+*.sha256
+
+# Temporary & diagnostic files
 temp/
-*.cast
-.DS_Store
+tmp/
 *.tmp
+dotfiles-diagnostics.json
+
+# OS & editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

@@ -103,7 +103,7 @@ for mod_path in "${MODULES[@]}"; do
     echo "# ── Module: $rel_path ──" >> "$OUTPUT_FILE"
     sed -e '/^#!\/usr\/bin\/env bash/d' \
         -e '/^# shellcheck shell=bash/d' \
-        -e '/^shopt -s inherit_errexit 2>/dev/null || true/d' \
+        -e '/^shopt -s inherit_errexit/d' \
         -e '/^set -eEuo pipefail/d' \
         "$mod_path" >> "$OUTPUT_FILE"
     echo "" >> "$OUTPUT_FILE"

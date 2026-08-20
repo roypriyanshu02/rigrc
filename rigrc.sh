@@ -8,32 +8,33 @@ set -eEuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 _BUNDLE_WORKDIR=""
-_BUNDLE_EXPECTED_SHA="9db81f2ae5e6a3f37cce59a8304739d6819f60db42b37f42134ddd596d1b5f32"
+_BUNDLE_EXPECTED_SHA="7d1c7f52228680cf7826713f4563a7c24dc62e5ee3d7d7ec56b69ac869718387"
 
 _init_bundle_assets() {
-    # If running inside repo where packages/ and default.conf exist, use local files
+    # If running inside repo where packages/ and src/base.conf exist, use local files
     local cur_dir
     cur_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [[ -d "$cur_dir/packages" && -f "$cur_dir/default.conf" ]]; then
+    if [[ -d "$cur_dir/packages" && -f "$cur_dir/src/base.conf" ]]; then
         SCRIPT_DIR="${SCRIPT_DIR:-$cur_dir}"
         PACKAGES_DIR="${PACKAGES_DIR:-$cur_dir/packages}"
         GROUPS_CONF="${GROUPS_CONF:-$PACKAGES_DIR/_groups.conf}"
         return 0
     fi
 
-    # Extract embedded payload to temp directory with integrity validation
-    _BUNDLE_WORKDIR="$(mktemp -d)"
-    local tmp_payload="$_BUNDLE_WORKDIR/payload.tar.gz"
+    # Extract bundled asset payload into secure temp directory
+    _BUNDLE_WORKDIR="$(mktemp -d -t rigrc_assets_XXXXXX)"
+    chmod 700 "$_BUNDLE_WORKDIR"
 
-    sed '1,/^__PAYLOAD_BEGIN__$/d' "$0" | base64 -d > "$tmp_payload" 2>/dev/null || {
+    local payload_archive="$_BUNDLE_WORKDIR/payload.tar.gz"
+    sed '1,/^__PAYLOAD_BEGIN__$/d' "$0" | (base64 -d 2>/dev/null || base64 -D 2>/dev/null) > "$payload_archive" 2>/dev/null || {
         printf 'Error: Failed to decode bundle payload.\n' >&2
         rm -rf "$_BUNDLE_WORKDIR"
         exit 1
     }
 
-    if command -v sha256sum >/dev/null 2>&1; then
+    if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
         local actual_sha
-        read -r actual_sha _ < <(sha256sum "$tmp_payload")
+        read -r actual_sha _ < <(command -v sha256sum >/dev/null 2>&1 && sha256sum "$payload_archive" || shasum -a 256 "$payload_archive")
         if [[ -n "$_BUNDLE_EXPECTED_SHA" && "$actual_sha" != "$_BUNDLE_EXPECTED_SHA" ]]; then
             printf 'Error: Checksum mismatch. The bundle payload may be corrupted.\n' >&2
             rm -rf "$_BUNDLE_WORKDIR"
@@ -41,12 +42,12 @@ _init_bundle_assets() {
         fi
     fi
 
-    tar -xzf "$tmp_payload" -C "$_BUNDLE_WORKDIR" 2>/dev/null || {
+    tar -xzf "$payload_archive" -C "$_BUNDLE_WORKDIR" 2>/dev/null || {
         printf 'Error: Failed to extract bundle payload.\n' >&2
         rm -rf "$_BUNDLE_WORKDIR"
         exit 1
     }
-    rm -f "$tmp_payload"
+    rm -f "$payload_archive"
 
     SCRIPT_DIR="$_BUNDLE_WORKDIR"
     PACKAGES_DIR="$_BUNDLE_WORKDIR/packages"
@@ -84,7 +85,6 @@ _get_backup_dir() {
         (umask 077 && mkdir -p "$bdir")
         BACKUP_DIR="$bdir"
     fi
-    printf '%s' "$BACKUP_DIR"
 }
 
 # ---------------------------------------------------------------------------
@@ -103,9 +103,11 @@ NETWORK_TIMEOUT="${NETWORK_TIMEOUT:-15}"
 BACKUP_COUNT=0
 SUDO_PID=""
 
-# Failure registry and diagnostic capture
+# Failure and warning registries
 declare -a _FAILED_PACKAGES=()
 declare -A _FAILURE_REASONS=()
+declare -a _WARNING_MESSAGES=()
+declare -A _DEP_RESOLVE_STACK=()
 _LAST_CMD_ERROR=""
 
 # System detection and lookup caches
@@ -132,13 +134,10 @@ if [[ -z "${INSTALL_GROUPS+x}" ]]; then
     declare -a INSTALL_GROUPS=()
 fi
 
-# Install queues: managed by install_packages and _flush_native_q
+# Package manager & metrics state
 _PM=""
 SKIP_UPGRADE=false
-declare -a _NATIVE_Q=()
-declare -a _SCRIPT_NAMES=() _SCRIPT_CMDS=()
-declare -a _FALLBACK_NAMES=() _FALLBACK_BINS=() _FALLBACK_CMDS=()
-declare -a _POST_CMDS=() _POST_NAMES=()
+declare -i _INSTALLED_PACKAGES_COUNT=0
 
 # In-memory package & group manifest cache
 declare -a _GROUPS_LIST=()
@@ -172,7 +171,7 @@ declare -a _TRACKED_CHILD_PIDS=()
 # ---------------------------------------------------------------------------
 _cleanup() {
     local code="${1:-$?}"
-    [[ -t 2 ]] && printf '\033[?25h' >&2 || true
+    [[ -t 2 ]] && printf '\033[?25h\033]0;\007' >&2 || true
     [[ -n "$SUDO_PID" ]] && kill "$SUDO_PID" 2>/dev/null || true
 
     # Clean tracked background children
@@ -180,7 +179,9 @@ _cleanup() {
         local cpid
         for cpid in "${_TRACKED_CHILD_PIDS[@]}"; do
             kill -TERM "$cpid" 2>/dev/null || true
+            kill -KILL "$cpid" 2>/dev/null || true
         done
+        _TRACKED_CHILD_PIDS=()
     fi
 
     # Remove backup dir if empty (no files backed up)
@@ -196,6 +197,7 @@ _cleanup() {
         for tf in "${_TRACKED_TMP_FILES[@]}"; do
             [[ -f "$tf" ]] && rm -f "$tf"
         done
+        _TRACKED_TMP_FILES=()
     fi
     [[ "$code" -ne 0 ]] && log_error "Setup interrupted with exit code $code." || true
 }
@@ -269,6 +271,7 @@ _run_retry() {
         fi
 
         rc=0
+        _LAST_CMD_ERROR=""
         if [[ "${VERBOSE:-false}" == true ]]; then
             "$@" || rc=$?
         else
@@ -279,9 +282,19 @@ _run_retry() {
             return 0
         fi
 
+        # Immediate abort on SIGINT / SIGTERM: do not waste retry loops when user interrupts
+        if [[ $rc -eq 130 || $rc -eq 143 ]]; then
+            return $rc
+        fi
+
         # Fatal non-retryable exit codes: 127 (not found), 126 (not executable)
         if [[ $rc -eq 127 || $rc -eq 126 ]]; then
             return $rc
+        fi
+
+        # Timeout handling (exit 124)
+        if [[ $rc -eq 124 && -z "${_LAST_CMD_ERROR:-}" ]]; then
+            _LAST_CMD_ERROR="Command timed out"
         fi
 
         # Fatal non-retryable HTTP status codes: 404 Not Found, 401 Unauthorized
@@ -403,8 +416,8 @@ _is_wsl() {
 # Returns 0 inside Docker/OCI container, 1 otherwise.
 _is_container() {
     if [[ -z "${_SYS_IS_CONTAINER_CACHE:-}" ]]; then
-        if [[ -f /.dockerenv || -f /run/.containerenv ]] \
-        || grep -qE '(docker|containerd|kubepods)' /proc/1/cgroup 2>/dev/null \
+        if [[ -f /.dockerenv || -f /run/.containerenv || -f /run/systemd/container ]] \
+        || grep -qE '(docker|containerd|kubepods|lxc)' /proc/1/cgroup /proc/self/cgroup 2>/dev/null \
         || { command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --container >/dev/null 2>&1; }; then
             _SYS_IS_CONTAINER_CACHE=0
         else
@@ -624,7 +637,7 @@ _check_disk_space() {
     [[ "${DRY_RUN:-false}" == true ]] && return 0
     if command -v df >/dev/null 2>&1; then
         local avail_kb
-        avail_kb="$(df -k "$path" 2>/dev/null | awk 'NR==2 {print $4}')"
+        avail_kb="$(df -kP "$path" 2>/dev/null | awk 'NR==2 {print $4}')"
         if [[ -n "$avail_kb" && "$avail_kb" =~ ^[0-9]+$ ]]; then
             local avail_mb=$(( avail_kb / 1024 ))
             if [[ $avail_mb -lt $min_mb ]]; then
@@ -654,11 +667,11 @@ if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     CLR_MUTED=$'\033[38;5;244m'     # Medium Slate Gray
     CLR_TEXT=$'\033[38;5;255m'      # High-contrast White
     CLR_CARD=$'\033[48;5;236m'      # Dark background card
-    SYM_OK="✓" SYM_FAIL="✗" SYM_WARN="!" SYM_INFO="i" SYM_Q="?" SYM_DOT="●" SYM_CIRCLE="○"
+    SYM_OK="✓" SYM_FAIL="✗" SYM_WARN="!" SYM_INFO="i" SYM_Q="?" SYM_DOT="●" SYM_CIRCLE="○" SYM_BLOCKED="⊘" SYM_ARROW="↳"
 else
     RESET='' BOLD='' DIM='' ITALIC=''
     CLR_PRIMARY='' CLR_ACCENT='' CLR_SUCCESS='' CLR_WARN='' CLR_ERROR='' CLR_MUTED='' CLR_TEXT='' CLR_CARD=''
-    SYM_OK="[OK]" SYM_FAIL="[ERR]" SYM_WARN="[!]" SYM_INFO="[i]" SYM_Q="[?]" SYM_DOT="*" SYM_CIRCLE="o"
+    SYM_OK="[OK]" SYM_FAIL="[ERR]" SYM_WARN="[!]" SYM_INFO="[i]" SYM_Q="[?]" SYM_DOT="*" SYM_CIRCLE="o" SYM_BLOCKED="[-]" SYM_ARROW="->"
 fi
 
 # Standardized indentation constants (2-space increments)
@@ -711,7 +724,7 @@ _ui_input() {
     fi
     _ui_bell
     local val="" hint=""
-    [[ -n "$default_val" ]] && hint=" ${CLR_MUTED}(${default_val})${RESET}"
+    [[ -n "$default_val" ]] && hint=" ${CLR_MUTED}[${default_val}]${RESET}"
     printf '%s%s %s%s: ' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${BOLD}${prompt}${RESET}" "$hint" >&2
     if [[ ! -t 0 ]]; then
         read -r val 2>/dev/null || true
@@ -724,11 +737,11 @@ _ui_input() {
     if [[ -t 2 && -c /dev/tty ]]; then
         local display_res
         if [[ -z "$res" ]]; then
-            display_res="${CLR_MUTED}(skipped)${RESET}"
+            display_res="${CLR_MUTED}↳ skipped${RESET}"
         else
-            display_res="${CLR_TEXT}${res}${RESET}"
+            display_res="${CLR_TEXT}↳ ${res}${RESET}"
         fi
-        printf '\033[1A\033[2K%s%-12s %s\n' "$ind" "${prompt}" "$display_res" >&2
+        printf '\033[1A\033[2K%s%-16s %s\n' "$ind" "${prompt}" "$display_res" >&2
     fi
     printf '%s' "$res"
 }
@@ -752,7 +765,7 @@ _ui_password() {
     fi
     printf '\n' >&2
     if [[ -t 2 && -c /dev/tty ]]; then
-        printf '\033[1A\033[2K%s%-12s %s\n' "$ind" "${prompt}" "${CLR_MUTED}••••••••${RESET}" >&2
+        printf '\033[1A\033[2K%s%-16s %s\n' "$ind" "${prompt}" "${CLR_MUTED}••••••••${RESET}" >&2
     fi
     printf '%s' "$val"
 }
@@ -851,6 +864,22 @@ _ui_select() {
     printf '%s' "${opts[0]}"
 }
 
+_format_env_name() {
+    local raw="$1"
+    raw="${raw#!}"
+    raw="${raw#env:}"
+    raw="${raw#arch:}"
+    case "${raw,,}" in
+        wsl) echo "WSL" ;;
+        darwin|macos) echo "macOS" ;;
+        linux) echo "Linux" ;;
+        freebsd|bsd) echo "BSD" ;;
+        windows) echo "Windows" ;;
+        docker|container) echo "containers" ;;
+        *) echo "$raw" ;;
+    esac
+}
+
 _ui_multiselect() {
     local prompt="$1"
     local -n _ms_items="$2"
@@ -896,22 +925,23 @@ _ui_multiselect() {
         if [[ "$_lock" == "required" ]]; then
             _rtag="required"
         elif [[ "$_lock" == "installed:"* || "$_lock" == "installed" ]]; then
-            _rtag="already installed"
+            _rtag="installed"
         elif [[ "$_lock" == "alt:"*" installed" ]]; then
             local _at="${_lock#alt:}"
             _at="${_at% installed}"
-            _rtag="modern replacement for ${_at}"
+            _rtag="alternative to ${_at} (installed)"
         elif [[ "$_lock" == "alt:"* ]]; then
             local _at="${_lock#alt:}"
             _rtag="alternative to ${_at}"
         elif [[ "$_lock" == "unsupported:"* ]]; then
             local _r="${_lock#unsupported:}"
-            _rtag="unavailable on ${_r}"
+            local _env_label="$(_format_env_name "$_r")"
+            _rtag="unavailable on ${_env_label}"
         elif [[ "$_lock" == "disabled:missing "* ]]; then
             local _r="${_lock#disabled:missing }"
             _rtag="requires ${_r}"
         elif [[ "$_lock" == "disabled"* ]]; then
-            _rtag="disabled by config"
+            _rtag="disabled in config"
         fi
         [[ ${#_rtag} -gt $max_tag_len ]] && max_tag_len=${#_rtag}
     done
@@ -923,8 +953,16 @@ _ui_multiselect() {
             cols="$(tput cols 2>/dev/null || echo 80)"
         fi
         local ind="${LOG_INDENT:-  }"
-        printf '%s%s %s\n' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${BOLD}${prompt}${RESET}" >&2
-        printf '%s  %s\n' "$ind" "${CLR_MUTED}space toggle · a select all · enter confirm${RESET}" >&2
+
+        local display_prompt="$prompt"
+        if [[ "$prompt" =~ ^Packages[[:space:]]+in[[:space:]]+\[(.*)\]$ ]]; then
+            display_prompt="Select packages · ${BASH_REMATCH[1]}"
+        elif [[ "$prompt" == "Select package groups" ]]; then
+            display_prompt="Select package groups"
+        fi
+
+        printf '%s%s\n' "$ind" "${BOLD}${display_prompt}${RESET}" >&2
+        printf '%s%s\n\n' "$ind" "${CLR_MUTED}Space toggle · A all · Enter continue${RESET}" >&2
 
         local avail_space=$(( cols - ${#ind} - 6 - name_col_width ))
         local desc_col_width
@@ -933,7 +971,7 @@ _ui_multiselect() {
         else
             desc_col_width=$(( avail_space - 2 ))
         fi
-        [[ $desc_col_width -lt 20 ]] && desc_col_width=20
+        [[ $desc_col_width -lt 16 ]] && desc_col_width=16
 
         local i
         for i in "${!_ms_items[@]}"; do
@@ -945,17 +983,15 @@ _ui_multiselect() {
             local radio_icon=""
 
             if [[ "$lock" == "disabled"* || "$lock" == "unsupported:"* ]]; then
-                radio_icon="${CLR_MUTED}–${RESET}"
+                radio_icon="${CLR_MUTED}${SYM_BLOCKED}${RESET}"
             elif [[ "$lock" == "installed:"* || "$lock" == "installed" ]]; then
-                if [[ "$st" -eq 1 ]]; then
-                    radio_icon="${CLR_MUTED}◇${RESET}"
-                else
-                    radio_icon="${CLR_MUTED}○${RESET}"
-                fi
-            elif [[ "$lock" == "required" || "$st" -eq 1 ]]; then
-                radio_icon="${CLR_PRIMARY}●${RESET}"
+                radio_icon="${CLR_SUCCESS}${SYM_OK}${RESET}"
+            elif [[ "$lock" == "required" ]]; then
+                radio_icon="${CLR_PRIMARY}${SYM_DOT}${RESET}"
+            elif [[ "$st" -eq 1 ]]; then
+                radio_icon="${CLR_PRIMARY}${SYM_DOT}${RESET}"
             else
-                radio_icon="${CLR_MUTED}○${RESET}"
+                radio_icon="${CLR_MUTED}${SYM_CIRCLE}${RESET}"
             fi
 
             local raw_tag="" tag_fmt=""
@@ -963,12 +999,12 @@ _ui_multiselect() {
                 raw_tag="required"
                 tag_fmt="${CLR_ACCENT}${raw_tag}${RESET}"
             elif [[ "$lock" == "installed:"* || "$lock" == "installed" ]]; then
-                raw_tag="already installed"
+                raw_tag="installed"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "alt:"*" installed" ]]; then
                 local alt_target="${lock#alt:}"
                 alt_target="${alt_target% installed}"
-                raw_tag="modern replacement for ${alt_target}"
+                raw_tag="alternative to ${alt_target} (installed)"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "alt:"* ]]; then
                 local alt_target="${lock#alt:}"
@@ -976,14 +1012,15 @@ _ui_multiselect() {
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "unsupported:"* ]]; then
                 local reason="${lock#unsupported:}"
-                raw_tag="unavailable on ${reason}"
+                local env_label="$(_format_env_name "$reason")"
+                raw_tag="unavailable on ${env_label}"
                 tag_fmt="${CLR_WARN}${raw_tag}${RESET}"
             elif [[ "$lock" == "disabled:missing "* ]]; then
                 local req_dep="${lock#disabled:missing }"
                 raw_tag="requires ${req_dep}"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             elif [[ "$lock" == "disabled"* ]]; then
-                raw_tag="disabled by config"
+                raw_tag="disabled in config"
                 tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
             fi
 
@@ -1026,7 +1063,7 @@ _ui_multiselect() {
 
     # WINCH signal trap for window resizing
     _on_winch() {
-        printf '\033[%dA\033[J' "$((total + 2))" >&2
+        printf '\033[%dA\033[J' "$((total + 3))" >&2
         _render_ms_menu
     }
     trap '_on_winch' WINCH
@@ -1085,14 +1122,14 @@ _ui_multiselect() {
                 ;;
         esac
 
-        printf '\033[%dA' "$((total + 2))" >&2
+        printf '\033[%dA' "$((total + 3))" >&2
         _render_ms_menu
     done
 
     trap - WINCH
 
     printf '\033[?25h' >&2
-    printf '\033[%dA\033[J' "$((total + 2))" >&2
+    printf '\033[%dA\033[J' "$((total + 3))" >&2
 
     local chosen_ids=()
     local chosen_lbls=()
@@ -1108,20 +1145,27 @@ _ui_multiselect() {
         fi
     done
 
-    local summary_str="${chosen_lbls[*]:-none}"
-    summary_str="${summary_str// /, }"
     local ind="${LOG_INDENT:-  }"
-    printf '%s%s %s: %s %s\n' "$ind" "${CLR_SUCCESS}${SYM_OK}${RESET}" "${prompt}" "${CLR_TEXT}${summary_str}${RESET}" "${CLR_MUTED}(${#chosen_ids[@]} selected)${RESET}" >&2
+    local display_prompt="$prompt"
+    if [[ "$prompt" =~ ^Packages[[:space:]]+in[[:space:]]+\[(.*)\]$ ]]; then
+        display_prompt="Packages · ${BASH_REMATCH[1]}"
+    fi
+    printf '%s%s %s %s\n' "$ind" "${CLR_SUCCESS}${SYM_OK}${RESET}" "${display_prompt}" "${CLR_MUTED}(${#chosen_ids[@]} selected)${RESET}" >&2
 
     printf '%s ' "${chosen_ids[@]}"
 }
 
+_set_term_title() {
+    [[ -t 2 && -z "${NO_COLOR:-}" ]] && printf '\033]0;%s\007' "$1" >&2 || true
+}
+
 _ui_phase() {
     local num="$1" total="$2" title="$3"
+    _set_term_title "Dotfiles: ${title}"
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-        printf '\n%s[%s/%s]%s %s%s%s\n\n' "${CLR_MUTED}" "$num" "$total" "${RESET}" "${CLR_TEXT}${BOLD}" "$title" "${RESET}" >&2
+        printf '\n%s\n' "${CLR_TEXT}${BOLD}${title}${RESET}" >&2
     else
-        printf '\n[%s/%s] %s\n\n' "$num" "$total" "$title" >&2
+        printf '\n%s\n' "$title" >&2
     fi
 }
 
@@ -1130,13 +1174,21 @@ _get_remediation_hint() {
     if [[ "$err_text" == *"lock"* || "$err_text" == *"Could not get lock"* ]]; then
         printf 'Package manager lock busy. Wait for background update or clear stale lock.'
     elif [[ "$err_text" == *"404"* || "$err_text" == *"Not Found"* ]]; then
-        printf 'Asset not found. Check release URL and target architecture.'
+        printf 'Asset not found on release server. Check release URL and target architecture.'
     elif [[ "$err_text" == *"403"* || "$err_text" == *"rate limit"* || "$err_text" == *"Rate limit"* ]]; then
         printf 'GitHub API rate limit exceeded. Set GITHUB_TOKEN to proceed.'
     elif [[ "$err_text" == *"Permission denied"* || "$err_text" == *"permission denied"* ]]; then
         printf 'Permission denied. Run with sudo or fix target path permissions.'
     elif [[ "$err_text" == *"checksum mismatch"* || "$err_text" == *"Checksum mismatch"* ]]; then
         printf 'Checksum mismatch. Downloaded archive is corrupted or modified.'
+    elif [[ "$err_text" == *"No space left"* || "$err_text" == *"no space left"* ]]; then
+        printf 'Disk space exhausted. Free up disk space on target filesystem.'
+    elif [[ "$err_text" == *"timed out"* || "$err_text" == *"Timed out"* || "$err_text" == *"Operation timed out"* ]]; then
+        printf 'Operation timed out. Check network connection or increase INSTALL_TIMEOUT.'
+    elif [[ "$err_text" == *"SSL"* || "$err_text" == *"certificate"* || "$err_text" == *"TLS"* ]]; then
+        printf 'SSL/TLS certificate error. Verify system time and CA certificates.'
+    elif [[ "$err_text" == *"Connection refused"* || "$err_text" == *"Couldn't connect to server"* ]]; then
+        printf 'Connection refused. Check internet connectivity and proxy settings.'
     fi
 }
 
@@ -1144,9 +1196,19 @@ _extract_last_error() {
     local log_file="$1"
     [[ ! -f "$log_file" ]] && return 0
     local line=""
-    line="$(grep -v '^[[:space:]]*$' "$log_file" 2>/dev/null | tail -n 1 || true)"
+
+    # 1. Prefer decisive error lines matching high-signal diagnostic patterns
+    line="$(grep -E -i '(error:|fatal:|fail(ed|ure)?[: ]|denied|timed out|404 not found|rate limit|refused|cannot |unable to )' "$log_file" 2>/dev/null | tail -n 1 || true)"
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
+
+    # 2. Fall back to last non-empty line
+    if [[ -z "$line" ]]; then
+        line="$(grep -v '^[[:space:]]*$' "$log_file" 2>/dev/null | tail -n 1 || true)"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+    fi
+
     if [[ ${#line} -gt 120 ]]; then
         line="${line:0:117}..."
     fi
@@ -1195,6 +1257,7 @@ _run_with_spinner() {
 
     "$@" > "$cmd_log" 2>&1 &
     pid=$!
+    _TRACKED_CHILD_PIDS+=("$pid")
 
     local start_time=$SECONDS
     local cols=80
@@ -1237,6 +1300,14 @@ _run_with_spinner() {
 
     local rc=0
     wait "$pid" || rc=$?
+
+    # Remove pid from _TRACKED_CHILD_PIDS
+    local new_cpids=() cp
+    for cp in "${_TRACKED_CHILD_PIDS[@]}"; do
+        [[ "$cp" != "$pid" ]] && new_cpids+=("$cp")
+    done
+    _TRACKED_CHILD_PIDS=("${new_cpids[@]}")
+
     local total_time=$(( SECONDS - start_time ))
     printf '\033[?25h' >&2
 
@@ -1269,30 +1340,62 @@ _ui_render_summary() {
     local installed_count="${2:-0}"
     local backup_count="${3:-0}"
     local failed_count="${#_FAILED_PACKAGES[@]}"
+    local warning_count="${#_WARNING_MESSAGES[@]}"
 
-    _ui_header "Setup Summary"
-    printf '  %-20s %s\n' "Execution time:" "${total_time}s"
-    printf '  %-20s %s\n' "Packages:" "${installed_count}"
-    if [[ $backup_count -gt 0 && -n "${BACKUP_DIR:-}" ]]; then
-        printf '  %-20s %s %s\n' "Backups:" "${backup_count}" "${CLR_MUTED}(${BACKUP_DIR})${RESET}"
+    local time_fmt=""
+    if [[ $total_time -ge 60 ]]; then
+        local mins=$(( total_time / 60 ))
+        local secs=$(( total_time % 60 ))
+        printf -v time_fmt '%dm %02ds' "$mins" "$secs"
     else
-        printf '  %-20s %s\n' "Backups:" "${backup_count}"
+        time_fmt="${total_time}s"
+    fi
+
+    _set_term_title "Dotfiles: Complete"
+    echo "" >&2
+    if [[ $failed_count -eq 0 && $warning_count -eq 0 ]]; then
+        printf '%s\n\n' "${BOLD}${CLR_SUCCESS}Setup complete${RESET}" >&2
+    elif [[ $failed_count -eq 0 ]]; then
+        printf '%s\n\n' "${BOLD}Setup complete with ${warning_count} warning(s)${RESET}" >&2
+    else
+        printf '%s\n\n' "${BOLD}${CLR_ERROR}Setup completed with ${failed_count} error(s)${RESET}" >&2
+    fi
+
+    printf '  %-22s %s\n' "Installed packages:" "${installed_count}" >&2
+    if [[ $backup_count -gt 0 ]]; then
+        printf '  %-22s %s\n' "Backed up files:" "${backup_count}" >&2
+    fi
+    printf '  %-22s %s\n' "Time elapsed:" "${time_fmt}" >&2
+
+    if [[ -n "${BACKUP_DIR:-}" && $backup_count -gt 0 ]]; then
+        echo "" >&2
+        printf '%s\n' "${BOLD}Backup${RESET}" >&2
+        printf '  %s\n' "${CLR_MUTED}${BACKUP_DIR}${RESET}" >&2
+    fi
+
+    if [[ $warning_count -gt 0 ]]; then
+        echo "" >&2
+        printf '%s\n' "${BOLD}${CLR_WARN}Warnings${RESET}" >&2
+        local w
+        for w in "${_WARNING_MESSAGES[@]}"; do
+            printf '  %s %s\n' "${CLR_WARN}!${RESET}" "$w" >&2
+        done
     fi
 
     if [[ $failed_count -gt 0 ]]; then
-        printf '  %-20s %s\n' "Failures:" "${CLR_ERROR}${failed_count}${RESET}"
+        echo "" >&2
+        printf '%s\n' "${BOLD}${CLR_ERROR}Failures (${failed_count})${RESET}" >&2
         local fp
         for fp in "${_FAILED_PACKAGES[@]}"; do
             local r="${_FAILURE_REASONS["$fp"]:-unknown error}"
-            printf '    %s %s (%s)\n' "${CLR_ERROR}✗${RESET}" "${BOLD}${fp}${RESET}" "${CLR_MUTED}${r}${RESET}"
+            printf '  %s %s\n' "${CLR_ERROR}✗${RESET}" "${BOLD}${fp}${RESET}" >&2
+            printf '    %s %s\n' "${CLR_ERROR}↳${RESET}" "${CLR_MUTED}${r}${RESET}" >&2
             local rhint
             rhint="$(_get_remediation_hint "$r")"
-            [[ -n "$rhint" ]] && printf '      %s %s\n' "${CLR_WARN}↳ hint:${RESET}" "${CLR_MUTED}${rhint}${RESET}"
+            [[ -n "$rhint" ]] && printf '      %s %s\n' "${CLR_WARN}hint:${RESET}" "${CLR_MUTED}${rhint}${RESET}" >&2
         done
-    else
-        printf '  %-20s %s\n' "Status:" "${CLR_SUCCESS}${BOLD}Completed successfully${RESET}"
     fi
-    echo ""
+    echo "" >&2
 }
 
 # ── Module: src/parser.sh ──
@@ -1369,8 +1472,10 @@ _eval_cond() {
         bare_c="${bare_c/env:/}"
 
         case "$bare_c" in
-            desktop|linux)                        [[ "$(_get_env)" == "desktop" || "$(uname -s)" == Linux ]] || return 1 ;;
-            '!desktop'|'!linux')                  [[ "$(_get_env)" != "desktop" && "$(uname -s)" != Linux ]] || return 1 ;;
+            desktop)                              [[ "$(_get_env)" == "desktop" ]] || return 1 ;;
+            '!desktop')                           [[ "$(_get_env)" != "desktop" ]] || return 1 ;;
+            linux)                                [[ "$(uname -s)" == Linux ]] || return 1 ;;
+            '!linux')                             [[ "$(uname -s)" != Linux ]] || return 1 ;;
             wsl)                                  _is_wsl || return 1 ;;
             '!wsl')                               _is_wsl && return 1 ;;
             vps)                                  [[ "$(_get_env)" == "vps" ]] || return 1 ;;
@@ -1429,15 +1534,27 @@ _get_failed_cond_reason() {
         bare_c="${bare_c/env:/}"
 
         case "$bare_c" in
-            desktop|linux)
-                if [[ "$(_get_env)" != "desktop" && "$(uname -s)" != Linux ]]; then
+            desktop)
+                if [[ "$(_get_env)" != "desktop" ]]; then
                     printf '%s' "$(_get_env)"
                     return 0
                 fi
                 ;;
-            '!desktop'|'!linux')
-                if [[ "$(_get_env)" == "desktop" || "$(uname -s)" == Linux ]]; then
-                    printf '%s' "$(_get_env)"
+            '!desktop')
+                if [[ "$(_get_env)" == "desktop" ]]; then
+                    printf 'desktop'
+                    return 0
+                fi
+                ;;
+            linux)
+                if [[ "$(uname -s)" != Linux ]]; then
+                    printf '%s' "$(uname -s)"
+                    return 0
+                fi
+                ;;
+            '!linux')
+                if [[ "$(uname -s)" == Linux ]]; then
+                    printf 'linux'
                     return 0
                 fi
                 ;;
@@ -1750,7 +1867,7 @@ _parse_section_header() {
         fi
         l_ident="${l_ident%.conf}"
         l_ident="${l_ident#.}"
-        if [[ "$l_ident" == *config && "$l_ident" != "config" && "$l_ident" != */* ]]; then
+        if [[ "$l_ident" == *config && "$l_ident" != "config" && "$l_ident" != */* && "$l_ident" != *"-"* ]]; then
             l_ident="${l_ident%config}"
         fi
     fi
@@ -2037,7 +2154,7 @@ _select_config_file() {
     done
 
     if [[ ${#available_configs[@]} -eq 0 ]]; then
-        CONFIG_FILE="$sdir/default.conf"
+        CONFIG_FILE=""
     elif [[ ${#available_configs[@]} -eq 1 ]]; then
         CONFIG_FILE="$sdir/${available_configs[0]}"
     else
@@ -2047,11 +2164,7 @@ _select_config_file() {
             choice="$(_ui_select "Multiple configuration files found. Select environment:" "${available_configs[@]}")"
             CONFIG_FILE="$sdir/${choice}"
         else
-            if [[ -f "$sdir/default.conf" ]]; then
-                CONFIG_FILE="$sdir/default.conf"
-            else
-                CONFIG_FILE="$sdir/${available_configs[0]}"
-            fi
+            CONFIG_FILE="$sdir/${available_configs[0]}"
         fi
     fi
 }
@@ -2072,8 +2185,11 @@ _preload_all_manifests() {
     _CONF_TMPL_BUF=()
     _CONF_TMPL_DIS=()
 
-    # Layer 1: default.conf
-    local layer1="$SCRIPT_DIR/default.conf"
+    # Layer 1: Base configuration (src/base.conf)
+    local layer1="$SCRIPT_DIR/src/base.conf"
+    if [[ ! -f "$layer1" && -f "$SCRIPT_DIR/base.conf" ]]; then
+        layer1="$SCRIPT_DIR/base.conf"
+    fi
     if [[ -f "$layer1" ]]; then
         _parse_single_conf_file "$layer1" "global"
     fi
@@ -2092,7 +2208,7 @@ _preload_all_manifests() {
     fi
 
     # Layer 3: $CONFIG_FILE (selected or custom user config)
-    if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE:-}" && "$CONFIG_FILE" != "$SCRIPT_DIR/default.conf" ]]; then
+    if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE:-}" && "$CONFIG_FILE" != "$layer1" ]]; then
         _parse_single_conf_file "$CONFIG_FILE" "global"
     fi
 
@@ -2215,12 +2331,12 @@ _prompt_confirm() {
     fi
     local answer="" prompt_hint="" ind="${PROMPT_INDENT:-  }"
     if [[ "$default_yes" == true ]]; then
-        prompt_hint="${CLR_MUTED}(${CLR_SUCCESS}${BOLD}Y${RESET}${CLR_MUTED}/n)${RESET}"
+        prompt_hint="${CLR_MUTED}[Y/n]${RESET}"
     else
-        prompt_hint="${CLR_MUTED}(y/${CLR_WARN}${BOLD}N${RESET}${CLR_MUTED})${RESET}"
+        prompt_hint="${CLR_MUTED}[y/N]${RESET}"
     fi
     _ui_bell
-    printf '%s%s %s %s ' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${BOLD}${msg}${RESET}" "$prompt_hint" >&2
+    printf '%s%s %s %s: ' "$ind" "${CLR_PRIMARY}${SYM_Q}${RESET}" "${msg}" "$prompt_hint" >&2
     if [[ ! -t 0 ]]; then
         read -r answer 2>/dev/null || true
     elif [[ -c /dev/tty ]]; then
@@ -2228,17 +2344,28 @@ _prompt_confirm() {
     else
         read -r answer 2>/dev/null || true
     fi
+    local res_code=0
     if [[ "$default_yes" == true ]]; then
         case "$answer" in
-            [nN]|[nN][oO]) return 1 ;;
-            *) return 0 ;;
+            [nN]|[nN][oO]) res_code=1 ;;
+            *) res_code=0 ;;
         esac
     else
         case "$answer" in
-            [yY]|[yY][eE][sS]) return 0 ;;
-            *) return 1 ;;
+            [yY]|[yY][eE][sS]) res_code=0 ;;
+            *) res_code=1 ;;
         esac
     fi
+    if [[ -t 2 && -c /dev/tty ]]; then
+        local disp_ans
+        if [[ $res_code -eq 0 ]]; then
+            disp_ans="${CLR_SUCCESS}↳ yes${RESET}"
+        else
+            disp_ans="${CLR_MUTED}↳ no${RESET}"
+        fi
+        printf '\033[1A\033[2K%s%-24s %s\n' "$ind" "${msg}" "$disp_ans" >&2
+    fi
+    return $res_code
 }
 
 # Return distro-specific package name, or the default name if none specified.
@@ -2261,17 +2388,41 @@ _resolve_pkg() {
 _is_file_locked() {
     local f="$1"
     [[ ! -f "$f" ]] && return 1
-    if command -v fuser >/dev/null 2>&1; then
-        if fuser "$f" >/dev/null 2>&1 || { sudo -n true 2>/dev/null && sudo fuser "$f" >/dev/null 2>&1; }; then
-            return 0
+
+    # Check if file contains a numeric PID and whether that PID is alive
+    if [[ -r "$f" ]]; then
+        local pid_val=""
+        pid_val="$(head -n 1 "$f" 2>/dev/null || true)"
+        pid_val="${pid_val#"${pid_val%%[![:space:]]*}"}"; pid_val="${pid_val%"${pid_val##*[![:space:]]}"}"
+        if [[ -n "$pid_val" && "$pid_val" =~ ^[0-9]+$ ]]; then
+            if kill -0 "$pid_val" 2>/dev/null || { sudo -n true 2>/dev/null && sudo kill -0 "$pid_val" 2>/dev/null; }; then
+                return 0
+            else
+                # Stale PID file left behind by crashed/abruptly killed process
+                return 1
+            fi
         fi
-    elif command -v lsof >/dev/null 2>&1; then
-        if lsof "$f" >/dev/null 2>&1 || { sudo -n true 2>/dev/null && sudo lsof "$f" >/dev/null 2>&1; }; then
-            return 0
-        fi
-    elif command -v flock >/dev/null 2>&1; then
-        flock -n "$f" -c true >/dev/null 2>&1 || return 0
     fi
+
+    # 2. Check fuser: verify non-empty PID output (BSD fuser returns 0 even on no match)
+    if command -v fuser >/dev/null 2>&1; then
+        local fuser_out=""
+        fuser_out="$(fuser "$f" 2>/dev/null || true)"
+        if [[ -z "$fuser_out" ]] && sudo -n true 2>/dev/null; then
+            fuser_out="$(sudo -n fuser "$f" 2>/dev/null || true)"
+        fi
+        [[ -n "$fuser_out" ]] && return 0
+        return 1
+    fi
+
+    # 3. Check flock (standard utility for flock/fcntl locks)
+    if command -v flock >/dev/null 2>&1; then
+        if ! flock -n "$f" -c true >/dev/null 2>&1; then
+            return 0
+        fi
+        return 1
+    fi
+
     return 1
 }
 
@@ -2310,11 +2461,54 @@ _wait_for_pm_lock() {
         pacman)
             local db_lock="/var/lib/pacman/db.lck"
             while [[ $waited -lt $max_wait && -f "$db_lock" ]]; do
+                if command -v pgrep >/dev/null 2>&1 && ! pgrep -x pacman >/dev/null 2>&1; then
+                    log_warn "Stale pacman lock file detected ($db_lock with no active pacman process). Proceeding."
+                    return 0
+                fi
                 if [[ $waited -eq 0 ]]; then
                     log_warn "Waiting for pacman lock ($db_lock) to release..."
                 fi
                 sleep 2
                 waited=$(( waited + 2 ))
+            done
+            ;;
+        dnf)
+            local dnf_locks=("/var/run/dnf.pid" "/var/lib/dnf/lock")
+            while [[ $waited -lt $max_wait ]]; do
+                local d_locked=false dlf
+                for dlf in "${dnf_locks[@]}"; do
+                    if _is_file_locked "$dlf"; then
+                        d_locked=true; break
+                    fi
+                done
+                [[ "$d_locked" == false ]] && return 0
+                [[ $waited -eq 0 ]] && log_warn "Waiting for dnf lock to release..."
+                sleep 2
+                waited=$(( waited + 2 ))
+            done
+            ;;
+        apk)
+            local apk_lock="/lib/apk/db/lock"
+            while [[ $waited -lt $max_wait && -f "$apk_lock" ]]; do
+                if _is_file_locked "$apk_lock"; then
+                    [[ $waited -eq 0 ]] && log_warn "Waiting for apk lock to release..."
+                    sleep 2
+                    waited=$(( waited + 2 ))
+                else
+                    break
+                fi
+            done
+            ;;
+        zypper)
+            local zyp_lock="/var/run/zypp.pid"
+            while [[ $waited -lt $max_wait && -f "$zyp_lock" ]]; do
+                if _is_file_locked "$zyp_lock"; then
+                    [[ $waited -eq 0 ]] && log_warn "Waiting for zypper lock to release..."
+                    sleep 2
+                    waited=$(( waited + 2 ))
+                else
+                    break
+                fi
             done
             ;;
     esac
@@ -2352,7 +2546,12 @@ _run_script() {
     fi
     local runner=()
     command -v timeout >/dev/null 2>&1 && runner=(timeout "${timeout_val}")
-    _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "$label" "${runner[@]}" bash -c "set -o pipefail; $raw_cmd"
+    local s_rc=0
+    _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "$label" "${runner[@]}" bash -c "set -o pipefail; $raw_cmd" || s_rc=$?
+    if [[ $s_rc -eq 124 && -z "${_LAST_CMD_ERROR:-}" ]]; then
+        _LAST_CMD_ERROR="Command timed out after ${timeout_val}s"
+    fi
+    return $s_rc
 }
 
 
@@ -2400,86 +2599,6 @@ _upgrade_system() {
     esac
 }
 
-# Flush the accumulated native package queue and install in one PM call.
-_flush_native_q() {
-    [[ ${#_NATIVE_Q[@]} -eq 0 ]] && return
-    local SPINNER_INDENT="    "
-
-    if [[ "$_PM" == unknown ]]; then
-        printf '    %s %s\n' "${CLR_ERROR}${BOLD}${SYM_FAIL}${RESET}" "No package manager found. Cannot install: ${_NATIVE_Q[*]}" >&2
-        _NATIVE_Q=(); return
-    fi
-
-    local -a update_cmd=() install_cmd=()
-    case "$_PM" in
-        apt|apt-get)
-            update_cmd=(_sudo apt update -qq)
-            install_cmd=(_sudo apt install -y -qq) ;;
-        dnf)     install_cmd=(_sudo dnf install -y) ;;
-        pacman)  install_cmd=(_sudo pacman -Sy --noconfirm) ;;
-        zypper)  install_cmd=(_sudo zypper install -y) ;;
-        apk)     install_cmd=(_sudo apk add --no-cache) ;;
-    esac
-
-    if [[ "$DRY_RUN" == true ]]; then
-        printf '    %s %s\n' "${CLR_WARN}${BOLD}[DRY-RUN]${RESET}" "Would install (${_PM}): ${_NATIVE_Q[*]}" >&2
-    else
-        _wait_for_pm_lock "$_PM"
-        if [[ ${#update_cmd[@]} -gt 0 ]]; then
-            "${update_cmd[@]}" >/dev/null 2>&1 || true
-        fi
-        local q_label="Installing ${#_NATIVE_Q[@]} packages via ${_PM}"
-        [[ ${#_NATIVE_Q[@]} -eq 1 ]] && q_label="Installing '${_NATIVE_Q[0]}' via ${_PM}"
-
-        if ! _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "$q_label" "${install_cmd[@]}" "${_NATIVE_Q[@]}"; then
-            printf '    %s %s\n' "${CLR_WARN}${SYM_WARN}${RESET}" "Batch install (${_PM}) failed. Retrying packages individually..." >&2
-            local p
-            for p in "${_NATIVE_Q[@]}"; do
-                _wait_for_pm_lock "$_PM"
-                _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "Installing '${p}' via ${_PM}" "${install_cmd[@]}" "$p" || {
-                    printf '    %s %s\n' "${CLR_WARN}${SYM_WARN}${RESET}" "Failed to install '${p}' via ${_PM}." >&2
-                    _FAILED_PACKAGES+=("$p")
-                    _FAILURE_REASONS["$p"]="${_LAST_CMD_ERROR:-Package install failed via ${_PM}}"
-                }
-            done
-        fi
-    fi
-    _NATIVE_Q=()
-}
-
-# Flush native and script installation queues for the current package group.
-_flush_group_installs() {
-    _flush_native_q
-
-    local i
-    for i in "${!_FALLBACK_NAMES[@]}"; do
-        if ! _check_bins "${_FALLBACK_BINS[$i]}"; then
-            printf '    %s %s\n' "${CLR_WARN}${SYM_WARN}${RESET}" "'${_FALLBACK_NAMES[$i]}' not found after package install. Using script fallback." >&2
-            _SCRIPT_NAMES+=("${_FALLBACK_NAMES[$i]}")
-            _SCRIPT_CMDS+=("${_FALLBACK_CMDS[$i]}")
-        fi
-    done
-    _FALLBACK_NAMES=(); _FALLBACK_BINS=(); _FALLBACK_CMDS=()
-
-    for i in "${!_SCRIPT_NAMES[@]}"; do
-        if [[ "$DRY_RUN" == true ]]; then
-            log_action "Would install via script: ${_SCRIPT_NAMES[$i]}"
-        else
-            _run_script "${_SCRIPT_CMDS[$i]}" "Installing '${_SCRIPT_NAMES[$i]}' via script" || log_warn "Failed to install '${_SCRIPT_NAMES[$i]}' via script."
-        fi
-    done
-    _SCRIPT_NAMES=(); _SCRIPT_CMDS=()
-
-    for i in "${!_POST_CMDS[@]}"; do
-        if [[ "$DRY_RUN" == true ]]; then
-            log_action "Would run post-install hook: ${_POST_CMDS[$i]}"
-        else
-            bash -c "${_POST_CMDS[$i]}" >/dev/null 2>&1 || log_warn "Post-install hook failed for '${_POST_NAMES[$i]:-script}'."
-        fi
-    done
-    _POST_CMDS=(); _POST_NAMES=()
-}
-
 _find_pkg_manifest() {
     local target="$1"
     local pdir="${PACKAGES_DIR:-$SCRIPT_DIR/packages}"
@@ -2499,6 +2618,12 @@ _resolve_missing_dependency() {
 
     if _check_bins_scoped "$dep" "any"; then
         return 0
+    fi
+
+    if [[ "${_DEP_RESOLVE_STACK["$dep"]:-0}" -eq 1 ]]; then
+        log_warn "Circular dependency detected resolving '${dep}' for '${parent_pkg}'. Skipping."
+        _CONF_PKG_DECLINED["$parent_pkg"]=1
+        return 1
     fi
 
     local dep_conf
@@ -2527,7 +2652,9 @@ _resolve_missing_dependency() {
         log_info "Installing missing prerequisite '${dep}' for '${parent_pkg}'..."
         _CONF_PKG_DECLINED["$dep"]=0
         _CONF_PKG_DISABLED["$dep"]=0
+        _DEP_RESOLVE_STACK["$dep"]=1
         _install_single_package "$dep_conf" "$dep"
+        _DEP_RESOLVE_STACK["$dep"]=0
         if _check_bins_scoped "$dep" "any"; then
             return 0
         else
@@ -2576,7 +2703,7 @@ _install_single_package() {
         if [[ -n "$mise_spec" ]]; then
             provider="mise"
             [[ "$mise_spec" != *":"* && "$mise_spec" == *"/"* ]] && mise_spec="github:${mise_spec}"
-            scmd="~/.local/bin/mise use -g ${mise_spec}"
+            scmd="command -v mise >/dev/null 2>&1 && mise use -g ${mise_spec} || \"\$HOME/.local/bin/mise\" use -g ${mise_spec}"
         elif [[ -n "$uv_spec" ]]; then
             provider="uv"
             scmd="\"${HOME}/.local/bin/uv\" tool install ${uv_spec} 2>/dev/null || uv tool install ${uv_spec}"
@@ -2644,9 +2771,13 @@ _install_single_package() {
         [[ -z "$prep_cmd" ]] && prep_cmd="$(_get_opt prep "$rest")"
         if [[ -n "$prep_cmd" ]]; then
             if [[ "$DRY_RUN" == true ]]; then
-                log_action "    prep: $prep_cmd"
+                [[ "$VERBOSE" == true ]] && log_action "    prep: $prep_cmd"
             else
-                SPINNER_INDENT="      " _run_script "$prep_cmd" "prep: $prep_cmd" || log_warn "Prep hook failed for '$pkg_id'."
+                if [[ "$VERBOSE" == true ]]; then
+                    SPINNER_INDENT="      " _run_script "$prep_cmd" "prep: $prep_cmd" || log_warn "Prep hook failed for '$pkg_id'."
+                else
+                    bash -c "$prep_cmd" >/dev/null 2>&1 || log_warn "Prep hook failed for '$pkg_id'."
+                fi
             fi
         fi
 
@@ -2734,9 +2865,13 @@ _install_single_package() {
             [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt post "$rest")"
             if [[ -n "$post_cmd" ]]; then
                 if [[ "$DRY_RUN" == true ]]; then
-                    log_action "    post: $post_cmd"
+                    [[ "$VERBOSE" == true ]] && log_action "    post: $post_cmd"
                 else
-                    SPINNER_INDENT="      " _run_script "$post_cmd" "post: $post_cmd" || log_warn "Post hook failed for '$pkg_id'."
+                    if [[ "$VERBOSE" == true ]]; then
+                        SPINNER_INDENT="      " _run_script "$post_cmd" "post: $post_cmd" || log_warn "Post hook failed for '$pkg_id'."
+                    else
+                        bash -c "$post_cmd" >/dev/null 2>&1 || log_warn "Post hook failed for '$pkg_id'."
+                    fi
                 fi
             fi
 
@@ -2745,16 +2880,21 @@ _install_single_package() {
         fi
 
         # Post-install scope monitoring & verification
-        if [[ "$DRY_RUN" != true && "$install_success" == true ]]; then
-            hash -r 2>/dev/null || true
-            if ! _check_bins_scoped "$bin" "$scope" && [[ "$scope" != "script" ]]; then
-                log_warn "'${pkg_id}' binary not found in ${scope} PATH after installation."
-                _FAILED_PACKAGES+=("$pkg_id")
-                _FAILURE_REASONS["$pkg_id"]="${_LAST_CMD_ERROR:-Binary not found in ${scope} PATH}"
-                _CONF_PKG_DECLINED["$pkg_id"]=1
+        if [[ "$install_success" == true ]]; then
+            _INSTALLED_PACKAGES_COUNT=$((_INSTALLED_PACKAGES_COUNT + 1))
+            if [[ "$DRY_RUN" != true ]]; then
+                hash -r 2>/dev/null || true
+                if ! _check_bins_scoped "$bin" "$scope" && [[ "$scope" != "script" ]]; then
+                    log_warn "'${pkg_id}' binary not found in ${scope} PATH after installation."
+                    _FAILED_PACKAGES+=("$pkg_id")
+                    _FAILURE_REASONS["$pkg_id"]="Binary not found in ${scope} PATH"
+                    _CONF_PKG_DECLINED["$pkg_id"]=1
+                    _INSTALLED_PACKAGES_COUNT=$((_INSTALLED_PACKAGES_COUNT - 1))
+                fi
             fi
         fi
     else
+        _INSTALLED_PACKAGES_COUNT=$((_INSTALLED_PACKAGES_COUNT + 1))
         log_success "$pkg_id"
         # Deploy templates and configs for this package
         LOG_INDENT="      " SPINNER_INDENT="      " deploy_package_templates "$conf_file"
@@ -2997,6 +3137,7 @@ _write_file() {
         else
             local tmp
             tmp="$(mktemp "${TMPDIR:-/tmp}/dotfiles_sys_XXXXXX")"
+            _TRACKED_TMP_FILES+=("$tmp")
             printf '%s' "$content" > "$tmp"
             _sudo mkdir -p "$(dirname "$dest")"
             _sudo cp "$tmp" "$dest"
@@ -3022,10 +3163,11 @@ _write_file() {
             mkdir -p "$(dirname "$stow_src")"
             local tmp
             tmp="$(mktemp "${stow_src}.XXXXXX")"
+            _TRACKED_TMP_FILES+=("$tmp")
             printf '%s' "$content" > "$tmp"
             chmod 644 "$tmp" 2>/dev/null || true
             mv "$tmp" "$stow_src"
-            log_success "Wrote template: ${target}"
+            printf '%s%s %s\n' "${LOG_INDENT:-    }" "${CLR_MUTED}↳${RESET}" "${CLR_MUTED}${target}${RESET}" >&2
         fi
     fi
 
@@ -3129,6 +3271,10 @@ _rollback_latest_backup() {
     while IFS= read -r -d '' bak_file; do
         local rel="${bak_file#"$chosen_bak/"}"
         [[ "$rel" == ".backup_manifest.json" ]] && continue
+        if [[ "$rel" == *".."* || "$rel" == /* ]]; then
+            log_warn "Skipping invalid snapshot file path: ${rel}"
+            continue
+        fi
         local dest="$HOME/$rel"
         mkdir -p "$(dirname "$dest")"
         cp -a "$bak_file" "$dest"
@@ -3320,14 +3466,7 @@ deploy_stow() {
         fi
     done < <(find "$DOTFILES_DIR" -type f -print0)
 
-    if command -v stow >/dev/null 2>&1; then
-        if [[ "$DRY_RUN" == true ]]; then
-            log_action "Would link dotfiles with GNU Stow"
-        else
-            stow -R --target="$HOME" --dir="$DOTFILES_DIR" .
-            log_success "Linked dotfiles with GNU Stow."
-        fi
-    else
+    _deploy_direct_symlinks() {
         local file dest ignore_patterns=()
         if [[ -f "$DOTFILES_DIR/.stow-local-ignore" ]]; then
             local p
@@ -3359,6 +3498,21 @@ deploy_stow() {
             fi
         done < <(find "$DOTFILES_DIR" -type f -print0)
         log_success "Linked dotfiles directly."
+    }
+
+    if command -v stow >/dev/null 2>&1; then
+        if [[ "$DRY_RUN" == true ]]; then
+            log_action "Would link dotfiles with GNU Stow"
+        else
+            if stow -R --target="$HOME" --dir="$DOTFILES_DIR" . 2>/dev/null; then
+                log_success "Linked dotfiles with GNU Stow."
+            else
+                log_warn "GNU Stow encountered conflicts; falling back to direct symlinking..."
+                _deploy_direct_symlinks
+            fi
+        fi
+    else
+        _deploy_direct_symlinks
     fi
 }
 
@@ -3447,7 +3601,8 @@ setup_github_ssh() {
 
     if [[ -z "$key_to_use" ]]; then
         if [[ -z "$email" ]]; then
-            log_warn "Git email is not configured. Cannot generate SSH key."
+            _WARNING_MESSAGES+=("Git email is not configured. SSH key generation was skipped.
+    Configure it with: git config --global user.email \"you@example.com\"")
             return 0
         fi
 
@@ -3473,6 +3628,7 @@ setup_github_ssh() {
         if command -v ssh-add >/dev/null 2>&1; then
             if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
                 eval "$(ssh-agent -s)" >/dev/null 2>&1 || true
+                [[ -n "${SSH_AGENT_PID:-}" ]] && _TRACKED_CHILD_PIDS+=("$SSH_AGENT_PID")
             fi
             ssh-add "$key_to_use" >/dev/null 2>&1 || true
         fi
@@ -3549,7 +3705,7 @@ _format_manifest() {
     for cfg in "${targets[@]}"; do
         [[ -f "$cfg" ]] || continue
         local tmp_cfg
-        tmp_cfg="$(mktemp "${cfg}.XXXXXX")"
+        tmp_cfg="$(umask 077 && mktemp "${cfg}.XXXXXX")"
         _TRACKED_TMP_FILES+=("$tmp_cfg")
         sed 's/[[:space:]]*$//' "$cfg" > "$tmp_cfg"
         [[ -n "$(tail -c 1 "$tmp_cfg" 2>/dev/null)" ]] && echo "" >> "$tmp_cfg"
@@ -3739,16 +3895,21 @@ _doctor_check() {
         local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
         local -a gh_auth=()
         [[ -n "$token" ]] && gh_auth=(-H "Authorization: Bearer $token")
-        local gh_hdrs
-        gh_hdrs="$(curl --proto '=https' --tlsv1.2 -sSI --connect-timeout 3 --max-time 5 "${gh_auth[@]}" https://api.github.com/rate_limit 2>/dev/null || true)"
-        if [[ -n "$gh_hdrs" ]]; then
-            local rem_limit=""
-            if [[ "$gh_hdrs" =~ x-ratelimit-remaining:[[:space:]]*([0-9]+) ]]; then
+        local gh_resp
+        gh_resp="$(curl --proto '=https' --tlsv1.2 -sSL -i --connect-timeout 3 --max-time 5 "${gh_auth[@]}" https://api.github.com/rate_limit 2>/dev/null || true)"
+        if [[ -n "$gh_resp" ]]; then
+            local rem_limit="" total_limit=""
+            if [[ "$gh_resp" =~ [Xx]-[Rr]atelimit-[Rr]emaining:[[:space:]]*([0-9]+) ]]; then
                 rem_limit="${BASH_REMATCH[1]}"
             fi
+            if [[ "$gh_resp" =~ [Xx]-[Rr]atelimit-[Ll]imit:[[:space:]]*([0-9]+) ]]; then
+                total_limit="${BASH_REMATCH[1]}"
+            fi
             if [[ -n "$rem_limit" ]]; then
+                local limit_info="${rem_limit}"
+                [[ -n "$total_limit" ]] && limit_info="${rem_limit}/${total_limit}"
                 if [[ "$rem_limit" -gt 0 ]]; then
-                    log_success "GitHub API reachable (Rate limit remaining: ${rem_limit})"
+                    log_success "GitHub API reachable (Rate limit remaining: ${limit_info})"
                 else
                     log_warn "GitHub API rate limit exhausted (0 remaining). Set GITHUB_TOKEN to resolve."
                     warnings=$((warnings + 1))
@@ -3894,7 +4055,14 @@ _export_diagnostics() {
   "environment": "$(_get_env)",
   "bash_version": "${BASH_VERSION}",
   "failed_packages": [
-$(local i=0; for fp in "${_FAILED_PACKAGES[@]}"; do [[ $i -gt 0 ]] && printf ',\n'; printf '    {"package": "%s", "reason": "%s"}' "$fp" "${_FAILURE_REASONS["$fp"]:-unknown}"; i=$((i+1)); done)
+$(local i=0; for fp in "${_FAILED_PACKAGES[@]}"; do
+    local r="${_FAILURE_REASONS["$fp"]:-unknown}"
+    r="${r//\\/\\\\}"; r="${r//\"/\\\"}"; r="${r//$'\n'/ }"
+    local fp_esc="${fp//\\/\\\\}"; fp_esc="${fp_esc//\"/\\\"}"
+    [[ $i -gt 0 ]] && printf ',\n'
+    printf '    {"package": "%s", "reason": "%s"}' "$fp_esc" "$r"
+    i=$((i+1))
+  done)
   ]
 }
 EOF
@@ -3904,7 +4072,7 @@ EOF
 
 # ── Module: src/main.sh ──
 # =============================================================================
-#  CLI & MAIN ORCHESTRATOR
+#  SCRIPT & MAIN ORCHESTRATOR
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -3917,8 +4085,12 @@ _show_help() {
     printf '\n%s\n' "${BOLD}OPTIONS${RESET}"
     printf '    %s %-30s %s\n' \
         "${CLR_PRIMARY}•${RESET}" '-c, --config <file>'        'Load configuration file' \
+        "${CLR_PRIMARY}•${RESET}" '-y, --non-interactive'      'Run in automated non-interactive mode' \
         "${CLR_PRIMARY}•${RESET}" '-v, --verbose'               'Show verbose command output' \
         "${CLR_PRIMARY}•${RESET}" '-f, --force, --reset'        'Overwrite existing files and bypass locks' \
+        "${CLR_PRIMARY}•${RESET}" '    --env <environment>'     'Override detected environment (wsl, vps, desktop)' \
+        "${CLR_PRIMARY}•${RESET}" '    --skip-upgrade'          'Skip system package manager update and upgrade' \
+        "${CLR_PRIMARY}•${RESET}" '    --offline'               'Skip network checks and online package downloads' \
         "${CLR_PRIMARY}•${RESET}" '    --verify-scripts'        'Prompt before running installation scripts' \
         "${CLR_PRIMARY}•${RESET}" '    --list'                  'List available packages by group' \
         "${CLR_PRIMARY}•${RESET}" '    --fmt, --format'         'Format configuration and manifest files' \
@@ -3942,7 +4114,7 @@ _show_help() {
     printf '    %-24s %s\n' \
         'packages/'               'Package definitions and configuration templates' \
         'packages/_groups.conf'   'Package group definitions' \
-        'default.conf'            'Base settings and shell templates'
+        'src/base.conf'           'Base settings and shell templates'
     exit 0
 }
 
@@ -3966,7 +4138,7 @@ _list_all() {
 }
 
 # ---------------------------------------------------------------------------
-# CLI argument parser
+# Script argument parser
 # ---------------------------------------------------------------------------
 _parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -3977,8 +4149,8 @@ _parse_args() {
             -v|--verbose)                         VERBOSE=true; shift ;;
             -f|--force|--reset)                   FORCE=true; shift ;;
             --verify-scripts)                     VERIFY_SCRIPTS=true; shift ;;
-            --env=*|--environment=*)             ENV="${1#*=}"; CLI_EXPLICIT_GROUPS=true; shift ;;
-            --env|--environment)                 ENV="$2"; CLI_EXPLICIT_GROUPS=true; shift 2 ;;
+            --env=*|--environment=*)             ENV="${1#*=}"; shift ;;
+            --env|--environment)                 ENV="$2"; shift 2 ;;
             --offline)                            OFFLINE=true; shift ;;
             -y|--non-interactive)                 NON_INTERACTIVE=true; shift ;;
             --list|--list-groups|--list-packages) _list_all ;;
@@ -4029,8 +4201,8 @@ _main() {
         printf '\nDotfiles Setup v2.0\n' >&2
     fi
 
-    # ── Phase 1: Preflight & Environment ──
-    _ui_phase 1 6 "Preflight & System Environment"
+    # ── Phase 1: Preflight ──
+    _ui_phase 1 6 "Preflight"
     _check_disk_space 500 "$HOME" || exit 1
 
     local net_status="online"
@@ -4040,16 +4212,16 @@ _main() {
     printf '  %s (%s) · %s · %s · %s\n' "$distro" "$arch" "$pm" "$conds" "$net_status"
     [[ "$net_status" == "offline/limited" ]] && log_warn "Network appears offline or limited. Online downloads may fail."
 
-    # ── Phase 2: Configuration & Manifests ────────────────────────────────────
-    _ui_phase 2 6 "Configuration & Manifests"
+    # ── Phase 2: Configuration ──
+    _ui_phase 2 6 "Configuration"
     _preload_all_manifests "$PACKAGES_DIR"
 
-    local cfg_name="default.conf"
+    local cfg_name="base (built-in)"
     [[ -n "${CONFIG_FILE:-}" ]] && cfg_name="$(basename "$CONFIG_FILE")"
     printf '  Loaded configuration: %s\n' "${BOLD}${cfg_name}${RESET}"
 
-    # ── Phase 3: Identity & Privilege Acquisition ──
-    _ui_phase 3 6 "Identity & Privilege Acquisition"
+    # ── Phase 3: Identity ──
+    _ui_phase 3 6 "Identity"
     _PM="$(_detect_pm)"
     _acquire_sudo "$_PM"
 
@@ -4061,14 +4233,14 @@ _main() {
     CUR_NAME="$(git config --global user.name 2>/dev/null || true)"
     if [[ -n "${GIT_USER_NAME:-}" ]]; then
         FINAL_NAME="$GIT_USER_NAME"
-        printf '  %-12s %s\n' "user.name" "$FINAL_NAME"
+        printf '  %-24s %s\n' "Git user name" "$FINAL_NAME"
     elif [[ "$DRY_RUN" == false && "${NON_INTERACTIVE:-false}" == false && ( -t 0 || -t 1 || -c /dev/tty ) ]]; then
-        FINAL_NAME="$(_ui_input "user.name" "$CUR_NAME")"
+        FINAL_NAME="$(_ui_input "Git user name (optional)" "$CUR_NAME")"
     elif [[ -n "$CUR_NAME" ]]; then
         FINAL_NAME="$CUR_NAME"
-        printf '  %-12s %s\n' "user.name" "$FINAL_NAME"
+        printf '  %-24s %s\n' "Git user name" "$FINAL_NAME"
     else
-        printf '  %-12s %s\n' "user.name" "${CLR_MUTED}(skipped)${RESET}"
+        printf '  %-24s %s\n' "Git user name" "${CLR_MUTED}(skipped)${RESET}"
     fi
 
     local FINAL_EMAIL=""
@@ -4079,10 +4251,10 @@ _main() {
         _validate_email "$GIT_EMAIL" \
             || { log_error "Invalid GIT_EMAIL format in config: '$GIT_EMAIL'. Expected name@example.com."; exit 1; }
         FINAL_EMAIL="$GIT_EMAIL"
-        printf '  %-12s %s\n' "user.email" "$FINAL_EMAIL"
+        printf '  %-24s %s\n' "Git email" "$FINAL_EMAIL"
     elif [[ "$DRY_RUN" == false && "${NON_INTERACTIVE:-false}" == false && ( -t 0 || -t 1 || -c /dev/tty ) ]]; then
         local git_input
-        git_input="$(_ui_input "user.email" "$CUR_EMAIL")"
+        git_input="$(_ui_input "Git email (optional)" "$CUR_EMAIL")"
         if [[ -n "$git_input" ]]; then
             if _validate_email "$git_input"; then
                 FINAL_EMAIL="$git_input"
@@ -4092,25 +4264,25 @@ _main() {
         fi
     elif [[ -n "$CUR_EMAIL" ]]; then
         FINAL_EMAIL="$CUR_EMAIL"
-        printf '  %-12s %s\n' "user.email" "$FINAL_EMAIL"
+        printf '  %-24s %s\n' "Git email" "$FINAL_EMAIL"
     else
-        printf '  %-12s %s\n' "user.email" "${CLR_MUTED}(skipped)${RESET}"
+        printf '  %-24s %s\n' "Git email" "${CLR_MUTED}(skipped)${RESET}"
     fi
 
-    # ── Phase 4: System Package Updates & Upgrades ──
-    _ui_phase 4 6 "System Package Updates & Upgrades"
+    # ── Phase 4: System Packages ──
+    _ui_phase 4 6 "System Packages"
     _upgrade_system
 
-    # ── Phase 5: Package Installation & Life-cycle Management ──
-    _ui_phase 5 6 "Package Installation & Life-cycle Management"
+    # ── Phase 5: Packages ──
+    _ui_phase 5 6 "Packages"
     if [[ -d "$PACKAGES_DIR" ]]; then
         install_packages "$PACKAGES_DIR"
     else
         log_warn "Packages directory not found. Skipping package installation."
     fi
 
-    # ── Phase 6: Template Deployment & Symlink Integration ──
-    _ui_phase 6 6 "Template Deployment & Symlink Integration"
+    # ── Phase 6: Dotfiles ──
+    _ui_phase 6 6 "Dotfiles"
 
     local _prof_tmpl="${_CONF_TMPL_BUF[".profile"]:-${_CONF_TMPL_BUF["profile"]:-}}"
     local _bprof_tmpl="${_CONF_TMPL_BUF[".bash_profile"]:-${_CONF_TMPL_BUF["bash_profile"]:-}}"
@@ -4187,7 +4359,7 @@ _main() {
     fi
 
     local total_elapsed=$(( SECONDS - start_time ))
-    _ui_render_summary "$total_elapsed" "${#_CONF_PARSED[@]}" "${BACKUP_COUNT:-0}"
+    _ui_render_summary "$total_elapsed" "${_INSTALLED_PACKAGES_COUNT:-0}" "${BACKUP_COUNT:-0}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -4198,398 +4370,413 @@ fi
 return 0 2>/dev/null || exit 0
 
 __PAYLOAD_BEGIN__
-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
-6KCDDjrooIMOOuiggw4+Ff4P3UTYtQBYAgA=
+H4sIAAAAAAAAA+w87XbbtpL9radAFbe2c0XJsmP7Vln1rGorifbKltdy0rTZHB2IhCTEJMESoC05
+yT37EPuE+yQ7A5AUSVF205sPtxueRJQwM8AAM5gZDADL0G6MqWR1W/iTbz7NswPPwaNH+g1P4b3X
+3Dvc+6a539zd39t79AjLm7vNvZ1vyM4n4if3RFLRkJBvQiHUbXh3wf+kzwMisxrQIj/BV+KwCY1c
+JQn1HSJnzHWJYl7gUsVk5QFpf9SnUnmFTfPpa6haNz91xZi6xJRGIVVc+ClPgNQ7HV50+v3R0/PB
+87MhaQNmyGqGUXgtpMX9iaiRSHGXK85kDaivLCWEC18ls6OQq4UFnbN8pmokoPYlnTLLoz68QsAJ
+I19xDwkpt6DMh3ah4RPqR8DYkfAdrpkaXLEw5A6TZMsWnkctyQIKDDMHuTdIkihBJiK0GWE+HbuM
+iJA4XOLXbaj0aHB6rPvgK8p9FtbItXSJeR6QJ0hoxYSZOj3NiruACo57w85P/e6oWFG2gri90hoM
+XSVfDUglEXmrHoRiwl2GAvpnI/nVIlJEULdDxgtyNhj2XhJXTLlv5KDH63//57/hH+n6VzwUvgfD
+qAXsAncx7D7/q/AJeUWsCaluvH15/BQH5knv6ejZ4KTbsjbw1agbHX3f0H1uMP+qLmdV8voxUTPm
+V1AC9Q8mr8AApS1n8e5oZT1qZcJz8oT5PhvlhZotykkWAXnBFpmLqdYxlICRCRun94ZFuEF6yB9u
+V2JVJ6ZaH+h+6gyfjV50z4e9wSnUSr7/Pt8gshTa+faSp17ESqHQfPL18eMKk9ReGZPQzoxGaOfG
+gfuKhdRW/IqZMVlR82adnArf6mUQn0Y0dO6pqpcJA0fGDBF8D5mKQj8dq7Sfu3WS7WN2dj8BgzIG
+a/pluvwXm7DpgO/VyVA74UFgTPeWnIlAbd9Hxaq8wuE76Rw96512R93TFy0L3OOlEsH7Kvm2TapX
+gYzntO4EsSDKiJSwHbL7YwPcdMOPXLeSwmxHBtj1UqDDw1ug9ozZl9fcl/yGlWPMOER/QcD8dY17
+DqKUAyG0WA/EEEZHlqVQNleIsJ6pkDFw0+vhEHbwyaIc7osRGDW1GAH3I4hKApfpWCWLvNQto1g9
+H1o7ovaM+1PyjLkBRA9fXJWKmjViV9Qd2cAlc7a2yVs9j1xhY6iIhaNLtmhXN5rVx6BafKI0/BXZ
+eECsqSI7oHTv3sVGjexkiT1Hk2WKxtx/jB9QbgI70BDrCjQbcKvZkcQqmT0T6WzW9A0gbWjc7WrM
+hTUHFCiuFthY6QTodDsxQDCLugX7gzix+amu0KKfBeK0osZGOjDaqiC+dwkAYgXE8sjhzg7JoOd6
+Vkl98reoVQla7OmxD6+SHllg+Qvwgmc2TCovSEvgOw6ud4keGE3Gkvx9/aV+cuxsV1ekh48984RD
+DnQ/oMrVHsS9qG78e5X8WIIUBxcyAZXFFN6VMe0aId/RsuaYK1mOPvQy9GUUGqnYtTheiV8PyDBe
+txi71iKxDRDXGOrrhZoKua30YMD89biU2lmMGSw+mAllYHov5ap5uk1qBmtwB9ZSvthqrhgLUMpg
+CcE02WTzO7q5fgBRwAZzApj94BbU7WquHR3JVDewuWoSzmQfGJJt7XGz1aWhTiw1DHJWx/59xlae
+hWIaUrAGuJI6WlrWYTy0X9hkYvjzbeJVxW8kEJLPU2ElIm9EMgT7QUOGy/6ZtfQQ+nfWY+Tjld9P
+WME5kLbHlH1XzSUoFT36uTDoUZ08A98nwgWuwDOpgS/umsrFweaBCBV51hteQCh5cT7ot/nUh7k4
+FmrWgvhZMicKZBZv2Pu1227qvFi2+Emv39WgXQPCst7T08F5t139vvVqPHk9bbE5V63fIviwXUbD
+VnDttFzZct2WS6GoNTNDV9XEF72T7pPB+Unnol397gn57oJUK2fng5OzC4h6T046p8ftakxALLrx
+Ng9r/e0x2cgXva9mBLVfXxqr78lZxhZ9caGUiCnyqLwkO7u7lcjlHsRB1hBt1U7OUicgnxzs7+8d
+FM3WEvxo54eDNaHWQR3HAowxhBM2g5EZRmOZxvUev6HqMw5SJfIlU+Sk0+tDlHH0j9ximPtBpNLV
+cPyrRZ6ePifnjDo6gZNLz1U2uG+7kcPMZI4pMp3PmkumFFjLe6kNJeOEo7S0S5aZwpZ2OdDvAtSj
+QQ4E1vjagkWxxScW9cYwXiKSZcDIh0CGTzhzEigsqKPEyOoEHshmYQUhm/D5smUXmHEsdJuyWJhh
+K091xSUHF5an8mh4acmFB7K9BGIIB5kN85+zDIayZ9aMOw7zLfShAJlMTE8ueZDy6lgKFjgJFUbH
+FuYkQ+FaNrgPaisWLknHMAGAkwW4VF/4zNDMA0zOKu46eiSXavQPtoCQ0/nzqM9atXqQOjMJ5tqe
+kWtYT5LnQeMYIjpCw1BcS0w0aYUgahHAFyPGSvW/2KtOtUViC22ZCixMvFzT0NHwn1bhYHk0GJr+
+WYQO8ekVn+rZ2yJHKnT/1mcT1Tjn05kC49RxVaZA19l8vH8E1cb1WNcibgvKj6E8aT8L2FtDsLdK
+gPl1UPnMbEoRyNYQF3TWBR1v6wp+Ber8/Eg7nzFj/ywkVxxAtBWshFoCDHBs3NZg5NJaGF0Phjqz
+jpptsHhOMZt1MgjVTEyFb3YI4hz8cYL7JdU1TYw16o6wL1nI/KtkDYelYeTrgTA8p8BpyGCZ+FuX
+bG4ZsncpjvPuMhqzQDhye5M0glDYjWbDnoYiCoq+8S3JrKDlQoJ4wLzoYbFgiBXJoO/++H1Tp4ZK
+0CxrubNRIHlM3mcCyjhw6g0xg3fR6Z12z9vNfCi5WycnOtuRT18uhbWFezDvyFUg4TNOYP1r+bbK
+Mr/99udhf3QMYdj5YHTawdX9+3RJvUTonV50zwdnS2AsDk48bodCiomKRx5WgrKQ4SkdDqgVBiJT
+lknTtavQ4zRZweKaQQ6NicR0xsRTIwjj7AZUorO/IjBZvLiqDMejzgsIKnAvKW4Ner6iArZy1wse
+gVxa5ocF2unj6mpF6LllaIaP4S/Di+7Jcdw6CL6wGrFdETnms25PptmZgGCHT7misKRl1E9hjoEJ
+cF/gOTWt2Rg0GB9Pya+8Eu3O6sZw+AwV+7R7dNEbnK7qjob3e93Ti3LYxcUvS8BbWDFmOJ+j9y1h
+FehvkB6U9qzfSegzgJ87v/RhGTDKIZROy5zOYTK4kuZLyjDiuVfcwioabpM3X2vXY/By95FlZv0V
+DTku6SXZMhxgxOMutivxlNUdHA2fdft95GnUH3SOu8dJF9P+ffDmQ+psVnMqH7AHsawl0fY4XxSb
+OqjF7KofxxHdggwDZkOoad+H1XNW8IUOt+8eg2qR/Lhz0ckRpwUpqcnQ6kTGKv0y5XpnEnaFdnjR
+ucjTLkuKrUPkXVLDT73THH3yu0AN5hjX2zkxn3UunpGOlMwbuwuydYypBRdFzJz7tE+kmR5Rxxkp
+MQqomqWJ/GUer7WBnWmtZPIetjBL38ruUsaAbWOhEWzMElaAOX1TVS7Xl+b53q/wAhVkR71ahlCQ
+w3qcNUCdRbuVPIMhU5RYSbA3BcF3HQ6TGgL2F1zi4ZT7vLrOdqV73LsYnKOmm28tcID5GfGiN3ze
+6SOG+QazwKCuKj8e28GEillJ3echWB2Is85TCFCr4H9krvv97nDYrlrnxHpCrJfE4sQ6KXa8j2rC
+/gQd/j0DAQHEU5Q2vlvWUf35xRPr7yuyPsLsBsj6AtOKeq1FAzqOD3rdlwHIBAR657F0Y0VHZEeD
+/uAcwuaTbLAG5WlRm1TnEG571u7+gc7srMOSdsiYn0Ur2aiJhzpttZ1nQYUR09TvV87NJIFFXMNK
+PJQusfRuCMudl/GEE2F8Bf02CU8us/BKvH9jVUsPBn1YVDWJfL2EkyawQm/wAdFUjvoPckBdDv35
+Y+1naG87rVSMb7Nsrw2Cc0jxxv/M7PWnoMwa+bnPcWEJM6wDRlWf9JkrlJi4Z2cDKszwlYYSy7C9
+uToLzG79cwkuo0ViSvJvmM70qcd+XA57vCGbLiLTmr812rC27s2N5iZquC8UobC6cLlDzAm426qO
+50AzF/Y8rCsa1sc3u+/gG7y2CZ4pmb+J28+ENQZzeoOI05ttKNGYN+sw5xpzvsT8j3WYN1JtJyWI
+aVlQAqvFeUxQSPcYoINbKBr8zlQ/IVa+at2bzDOO/Bse7JYwEdIwhxn5IdZY2vrhTQLIVWFGZPlM
+dWPlHc5hxryvIgJ5ganyCn/NNwx4mLIMwdmXIB8W2FzTm3kBbX6TRr95HjOSwycRzQpmgcecItvU
+R0Ues2SyMIdccUrSSVdFE5dodFKtNljvKxXv0tZndTLHTizTPhDZwM1ZUvAYAvJbLNzSMK61bxkU
+s+LNuiDjd2KUSnzSPN7HCpk+Kg7rf9xauOIOxtHxofCEBCp7w3TnnQUYClhZubDOwoFIED3q8wmT
+Sm5XNA1xZXsTKsW8JXjUNp5ygx86R5rdXrEmPMwfI0NFLhBuJnW6pk7qPkmLqCnqpAXm91GKEXrt
+TTyDwpMCh08m7U38LG0EE43tTZNuLAFPDHyyFoEZBFaCgMfVX2KkTidMLUgnloeh40DEy6us19ub
+oC71+rIgKWnkCjOlGYANNdtBZgS8q/YmHutZFqB+QlmspunQMVdQB/oyZzbZ0DEPsdwEGrgM2G9v
+ysgRZGNrYgPMJ1Yzd1QlRcbMUowLs99SkRv4K+dfEoAeqp+HffKfoIx4W0FMrD7oF0mSr+aUnsyk
+lU2GdyUplUnvQeyGW4NhHbpTnk416k5EwHzs9BJ983HGB2aqtF0e3FldMLZFsAARxMjrKgvENXQJ
+Z+rvqDKgUsHYF2isU3FmDpzDDIhrfsqUdQRNjwUNHdM2/PvSV2/uxRMbL9n4hG3gkZXD/f0197/M
+9/z9r+be7uE3ZP8T8pQ+/8/vf6XyH2m/JD/FPcDb7//t7D3af1SQ/97Bwe7X+3+f43lASjUAfM9T
+vZfrsAn3zYWxGvGYog5VlGw5TNoh17cRauAs8E3dmr5dtl3T2+VJVISOM9L7DCJ0wJVAjKfbaWHY
+9bqSqYi0yVESisW39kzQBrEy8xWneHkv2eqMD5RUkraBeEJxHynpDhQUTinWyJQr/WG5E6hqGkyB
+4ygEvq+neA0QFKFGIIqvmWC+BuF3TcfMNYKboQHQoF8BtpS4hs9rGqS9KV4hLPbs3Fwo1EOD9xDT
+jiQE2Z5gFibbEY9Dx5KW9JgUqweX5wUKRRS5ikOH5/oao24tyZPp648g2FOh8IYXk7P4qAVugkmi
+vGiOpRmuEFAnMxY6IYEwWhKKN0LBAUOdPjVhdY4gJFsAxB5AZdv12/qE007OcJQRF0b2ZgKDLebc
+gQGmKuIgL+gfhpAABBFI+D+mICZ2Q2vEiSb4IZWRDfR1LJQSHt70dBXVtLs1w3tNdxYaUgsnHcbk
+hueqCnoBCDk0d19d6k8jVOME/bYuRVfAzELNhL9Xg8U/dgQWtciRL0DdBFaGV0uR6XHEXcdKNRsU
+0UBtj14CnQ+rDeiErXeagNYZ4wBcwijXyBt6BaBLoVwcI0con6mldsSXX4vdGuq9ZuIJH3cLcDcd
+uzeDeOiahrhSkkF8pOWWDvq2E9UAd85rsD6ZXaNAfOd6xu3ZkoHC7doVRobPauTF2SlITEW+z9xY
+TYEu1GfMEsW7VXlQnPABKhFNgA07FNcO1IBzGNZxmBPHERWRM3Ghe6g5+oawTR1nAZNEID3UhVKB
+MFKm3KfXhFfVIj56Yu4Sw6oA02bxjWLkXwt0abtu496cpanFb22hhAReAuFoAZv3stwRlxCHA9/T
+mTZf40i5SP/mtxregGI+6N1sAfyAqcYuhQzm0xtQs7RbKVvFbj3BOFkufFv3AcR1LcLL39eLCYTf
+sIazgacQa4AXjDgyANKAX3NkNuCo1IpR12HIMpU2ByY9mrKW3q9eHXFHq6kGavb6/ROch/4d1hJm
+UuQwGD78cLm28VKE5juF6TYN6RVqqAEC2tx8xUXPkkq4LvVgoumXZQfBX3LBkHr/VA4ffyXw4fH/
+XvPwa/z/WZ4S+RemyL++Irgj/m82dw8K8j9swpLga/z/GZ5XsQK8ruDuB1jPgvQrY4gd9SFwAE0X
+tQy4YK+fCjEFZ9JZIqBtTU14RdpgXzFKkiys2J6DlhqCb2JZEMApQTbbM6UCuQkFypVXzfousSZy
+2Ce6uNXI6mV9qhtrAIMNCF0Udd06hLPvdMi/4hvyWWWILmBFU9Tyhoy30OtvpPDjFDPuJlU98Ahu
+tUWqmI6s1rAoCam7ydoGwSG74uzaIKAXlTCyrGPbEOMNfHcBKJoZTHIv/9RAyaAd9Xu502no+ZK0
+9av4mIvZOVzTE3PJNHs2Mz4NcxdVfFimkknIgcjLjgOaFBwALdPr9iYiWvGvzb+kp/xrPiX2vxA/
+fXr7/wicfd7+HxweNr/a/8/xrNj/gvSz9t+AimG6LsRonX1ke2+aq9MPN/GGcr1Jl2DdxmIem2Rt
+sTMXpqHYHCOowsId7fareKO0ilfftqB+WHk2Hj7c1rY+B6DXcg3gJgpZOSjewpyaQ+mlKFM/Cqbl
+ILyFUQ4xq8tymB94oV1SHiwCXgoAjxdSvLlYX8Ni3AuzBCxBqYNLWyl8+LDxsB4wr7T8ki1Kyk2a
+wIyyhr2u4EnOvFfN6qScgQcELy3J1hT/GA8DbzqlqFF4T87lWuTbldyOlqZe6/ZsFzeyEOcv4OjK
+7H+yIv5YewF32P+dg/3dgv3fP9z9+vf/Psuzav8T6ecsPxYWDP8gYH6npyfZPLX8YEFhPD+K9Z9R
+NQ0U6KBnNDLvBfCO2tHguPtydDo4NRePOkcXvRfddpPc7R90fcZk1ZXw3Ng50ACYw78xEwiX2ws8
+VCl8CGp/i5hU1UrsNka4IkBYGuVb1yFXrJqzQbnhwZg+NUQ5W6PB602NMwdbgzifytSUzf80XfaR
+DMBd8d/+yv7fQXNv/+v8/xzP6vxPpZ8zAKZUa0jN/CjGgbpQa/onMAa6cm0LYivwOwNBTYdpAiue
+7cVQsDTug/rFNQZ+r2tfA8E/VSCoY3k02DxkndiaZ8N8zOGYcob30vWOcSF2NHpsrnaW2+zMXLjF
+dEchmO4M6v0MFkvsf7rh8Zniv4PDg+Zq/Hfw1f5/jmfF/i+3uzLm32yFGRDY8CsWxj/QTeT9gL6R
+pLfquD/BvyVg4yEBJMm7AWgXJlRSdx0b/COewVBD4FaSJPAZc2Ln5VbMuQSzqXdneKhNWMpYEily
+n8eu49XD1xVbzS39lyXb5O/NH3YrvjUNIsulCzw70CY//PBDZeLiCRT6f+w9aVvjRtKfo1/Rw5Aw
+TJBvYIZZ7cYDDMMTrhdD7nn8CKttK+iKJANmwv72t6q6dcvYZBlDdt2TYKkv9VVdVd11hCH2s67A
+DuLRQzj0YRfDXGqdzF7gETMa9wg48qmGe+2g1Cmwqn3ftdnH0WCACPUDkJpoC0TICwvzzTDKV65Q
+5F1Vfv3jmjt0dON/UoZ9qH8wsC3V9QfV/4OURmVdRXrUVzffq/swXP6oF6p7e+cf0p2pbzTftBSy
+yqexWqUBg0Mj0cxXechDXT2gZdCs1NU399RJAxRXuTltvMV6QUwhx/vgoH3Y7rZPUXWmc6bVG5uV
+GvyrpxJOjk/PtDe1N7VU3PbZT10ym0XfT+KPunsn592D9s+7px0NJypJ+nCAtofbZ2dHWqb29mn7
+4GD3IBO5e7RzcgysR/dw9+x0f7sDiS/ZjjBTzujagMlpJDPKvUu88SZRB//KhKl8lZlYn3suWgaX
+pvT0cLia7veH7unuybE264SWS9ILgwNVBMBqGporskk03FsoxaW9iI1tbHluEGqJYQZVxfLM0LlN
+3BH2MS/GjFAFYHLumOEnZSfZILR4kuVGsR9vEh1qCXsVM042jAGaKWLtk/1VZcftjfA+hJa6VgD/
+eEMYmOFwdEGkYjxWyRbT7gMBo0k5B1T2GJDsTEd0/5NyNva4FpgoFaWkDINoS2ImSBdc+3ooVcCT
+ipfSuVGoQlMp1+SVreDlUQdaEGpkLRS2LTSQmJWHpoITxKBJIl1koFrfCZt7+dJyhqdWIvO9I+uV
+Uv9D1E54YEzaTH1av6bDhFb1P79pQP4bM2R1FKpeUU55QD2CddHXTQtI3Siqw3vaeqAcwShr68oB
+Wks7OkazdhrZU1O+Ny0Lt0ENpbk4SeTsiw39k/Ij8BDceD/WpAuAZN4Ssi1ZV9+wZFFMukeLFE5T
+k4p6p8lrVtU/mUDURp1hihAEZpyI0qyAVu+xdjLzGokVfCLdkbgZ2kpq5ayU5sMDmCgbtkftOVcA
++7+jZJoo8fD1NrVBsvTUFqnlLUqMXwh5t2SvTeTKpMpjoBTa4V+pYvmuFDY7imfFJhbLu15pcdeb
+obTPJ31fpszUAj0cBeVdgIQpNVjuAMr+7o58oI5ShdVRdnbVPlNdBnTHSjTggoZJ5AilRVr6ZnrE
+RTWEHYOM7YcSG8izAWRUgVCEMbIGjUt1oGlz2yY70gJPo3YXS4ptZa3L9k0nV6uK5tgYjAERzUuv
+K4PBqA/RtJ0aI6YO2ec79m0ZVkx0RfNWglPNYkZsqyX5LDNcLpRKYcsNwkpBQ/tOSY2wVza63DE8
+10R8tvy5vqUizgSUGZNTW0g/ZUc0y/cWTDZNHF1NixD6Rw6k95BpWs5kL5H5qAT5OWrVXXVIeScY
+2Jb14QAA+QybAdIGeshSFSyVtKQsTkM+hSizQzH9+dZle/77HzP0e2KnrupVschy/cJqK9nG5ZfE
+A+vMrdri+ihqPZXw/64ErkdTBJnC/zeajfU8/9+sL85/5xIK/L/kkFPMv4yZxOYLRkfI5cYsvsA+
+CorMuyNkvN/Wag/i7wG7VEPbk4uxm2LuI0I/XqZ2mvVHs2qkYDmcVB6Vlckee3m6PChIjkEKZwUv
+2UdgiJg0Q5rzUhWQaa0xJiTbar3earaEPgEO2xCLu74JvF+AtjHZduf0Q+yWqoKXRwLzHbZ/ksY1
+uofHO7sHwGEKU5Qi+ej8MMWYMpTj/+GkowbSuhcjm8Tkfcrz+RWSPsfHh1A7NPO0fYgn4sAxIotn
+MGxSsMauh8CMoXIlYGvqs7S+RtoMAaqCMxftHMPmhyZuY+dX+Ak8SA+hdqgWOuLj5xIeOFI4kHdp
+gixzBpUUm0rm9SIOVfxGcyyJuIpRjT4pnJXdw63SGohJoCyvGq+ROD30xxHxJZd7iomNmcMMQyjn
+IHseIWZ6qTTn8en+3v5RRysg3ddrMipeHFuvl2AgyyopWRGTsmZXR+5yUvQxUm0nVZC8IZAU/nPL
+mZz4rNu1tBWRZ+VhxQTNGUSlYcUG4V+pwkuqgM3kWR60P9NQhv9TahCPQgVMu/+tbebl/zdatQX+
+n0so4v/U7GeoABlfIgWSkf17vEvf6IspCcAZb33FqVtUPqkof/m7HABrZesovV320dSVsRDrFl53
+IDed2GFLlnLCg8kdMvpvIqnx4FJeXi5RARlVIrUWD2WZBHhyE5mVAY87OUXqO52vRM47Sr5np/V6
+sMfKbIst9r8lxPs/qmN/ISMQuMk/TP+r0Vhf6H/NJWTnf/P2Cew/1BrNvPx/s7W5kP+cSyjg/83b
+NNbfvF3bvNXh/9sc3t9UfzE9MofAdGEdsMD86x4y0t7mrempfTydMpw+VWl6ye0/vQmWG5/yiP2p
+h+e/PmThP2cxYz7yn7X1AvxvNOqbC/ifRyjAf24JpDeD2R3ArZW6dFtjadPWM9YDO0J16Nr8wufX
+VKl0J10x8pnx8C67Sb1HN82hfpFyKROU71L5XoutKh8b71qFQYLGFaO/azz//SsL/8igPT4FMO38
+v16Q/24BvbiA/3mEMvlvKyf5beXA6uPZ2QmgZ90J+tIGSjlQiaIESfQYgw+9lfLsmEJi25bfi+18
+SnvEaZeCeILQcy2G0iXo9PQZOBdU6FhDlTIqqB9CZwpLMt7neIULsejwjU58A/qb9pt4Jq5LAujh
+KQ/RUQeMcsgHz8iwuewrTJeDPmuSC556TbH1G4rAt0ZN8akLGmuKJxgZS8f3hnzHOnzeHwXcSI3B
+8Sj0Ruh/7D0f6lfmc7M1PWVcLCmLqaD4k4oe3dQL1xgrAZqXDhVy+Md93/VTJz+RSfbz04NZ3Z4Q
+nCwp9tj04lt+cbgmLs+KR2zx3KzH52tmXx5w2Tx/4f7wunq6M9SBgsf7uMKVNF66K3fPHxn+D4Ys
+/ifCat74v1bfLOL/1oL+n0so4H9cAmn8T+8lRsNIAso00Hxd35zE/IvCRAHQY0wB0NtT930R8vAv
+bWM+8hYwDf6b9fz5b6u1saD/5xIK8C+XQHoLiKJyEkAohC1OANHLLBrJRFmWPTMs3wviWmg7iN7i
+HSGOQOEYemXwyqKLP1UlF8OkJFEmVfnU4/h3DQX4/wIXAFP5/2Ze/q+5WV/Yf55LKIP/HOzn7bwB
+ZOatME8C+ATYM4BezvtDgrxyj7TsTFIf+kqy1O993ekNoQZbNx2ogoyPQrLnjxweXRiItzN9ECSy
+Ad4owHyo+9vh4cg75bYbJiX6Lqp7Z4v4HP9BIe6gmLGRrgxVUr7yObrmTqJ7wN8LU76QKGWpNCHN
+jgIOgk3Wmhu1GmYm09fUoJ5v4QiZDjC98LWbnjWC4aZdVWPZsRGO56FYGPrmxSickC1Jpi/ZNo0h
+zNiFm27wBY0mpATIfGpMFVlD7hswLThD+iBJlRO+Bfw6rhOq2RrZDuQYmWgaELoCkdjxqGOujyLs
+eANEtqkhFf2NYKo1cH3gjG1IIw/lA1+3la/I58ehe0WDLaccCtncx9X5FfbQMnuh8BSvsVusrang
+IqExw4WA7hPzw0HmoCvwJOIm5Iqt6qZyKr+S5AMOAnZD6jKowQU2Bid3yHuXLk6bpVMOyx2g74+P
+u+0dxFeQHzprc4dEX2h0IVpEqKrjqigiAuOHGG6AXUIJRDSATmUHfIIr82QpSDB5XQmuPfrrKq//
+DQ/QDqXb9cZCc6BbhSh4USrCVjC+ovCpUgHqXa8qlauABEOUyk6n28EGKGfDkX0RVIyLyS1IVlnU
+Coau0YWTG+5amtVXFkj5+Ycc/vcG88f/rY1a3v5Tc3Mh/zefUMT/3iCD/+E1h/+d0cke407PH3uJ
+ohfsSKYzmEAIoNWSiBTA50aKGqA0SfT3hrZrsM1ajUW2Tkpp/Zw9V7KJEq3ciZcGH9H2G7mRf/JT
+4lkPkyMpfLVnekPuqx5gX6EsHbD2bqexvoE/9bcN/ElyGybAc5jJ3fnYBvjCn+abFv5AWUXi2FRG
+FeWvSzMXv8d+Odh/z97/sn/SYPCHncd+7QBx9bgfRu1AdC/rVILG5aRo2UeKFh9TpB0Xtee7QaBi
+nbHTcgXQZzC2L/lYJSynjAIu5JdTVwknvnml98bs2HsO90N/ZQVAL5FwQLFsfOZAQqiSFINuhkPf
+vVZhDEwjAEoKFTGA5DI9E4VGIZrt7wTsle64zhgKjlfR60TI5KgGqPRAErsAWdL5ApQJUDvE4BFw
+K+lvpH2Dog+3HTPw8ErnJLXSnnzMygeyN9T9AHo4CvvqGxzKgc85GgdVqGsqWjTSQ1a7sVyIQzBQ
+Xblq6M5mBHnIkSfavYYZMPvjezLQvU8faue+55tOnt+JdyyxYtP7lmc6EOOP8dIFyWLcCGNn4dU4
+NbB1P4wBmCBADUOLIXuBtzNJzGaDOI705yfVJ9RpSH1GbMTf3tz3+XKTDy9fSGsGaApDOEpkJ7Ic
+LDOLtFrZq73zfXYVkLElWDR9WINoH2M15cxuZ79zctD+OXZ2TJE/tn8+aB/tdJPEiWrxcWOBVLZ5
+c4oCJynu5ossLX+3VKroHmf8o2AA6t56Ifv0Ogfhpdp4WHOpxPSab+r1B9WL+eNahc88ZULVPTGR
+k2vP1iyzU+UTmxuGBdvjEyvEvEltsFpuhKxRetlmFgsVL2aRdUg13Mw3RBqOQXxzW+7gW97n7p3s
+dc/OftaWll9h60qgZXXp6d0QZul/4ebqsVmAqfJ/tbz/h1ZrYf9xPqFA/4slkGYBvGAtdL21PmDM
+tSsbjzXWvEvTstbIOVfRERmab0nb20i8CZULCIsPCvZAvKiAg2MOIYnKAF56x7hv45HeQgOb29oK
+5NRHN3jAAhCqqV9DJPuTDbluIH6p11cyRXreqFgEInNFnhyG/5OQhX90bDf/+/9GK3/+36o3mgv4
+n0cowD8ugTT003sWxnfcUFz7jW3LdC4j33/l4C3KE3DTYwzX9JalTDEqlvtTVUN8J/gbg9ezDzn4
+v9YfzepnEqbAfx0v+/LwX1v4/5hLKMI/ejVNwz+8o0B8Zgdoj0IX+GVuUDIeIURyj/EeQLlRThRv
+P66AhkhMNBS0fIR2sPDjJ04CEVsvv0KSg6l2zmyOfn3JVqqH3N6qss/EX7Plxt3K6jtqzJRiHchS
+KEd0/PJn+OiWWrtjqhWyVu3tBrCe6Sq++YZy4UdENv4HUv7pPNKqXnALrXiFnWD/YHXAb+xf4meL
+vcLIf4rq/yV+tjDjKluFhrwiuxR9OZ7QCQs/eHt3yAg0adfNO4zHEoYBfdAo/pb7LnPhJS5wEWj1
+Q6CXRk6oLQe3Gd/0sS0MwfFv1GqpL0Vp9iXNcpJQoiQsDGrQWrk/4yskGpn6B8xFlG1FaIv0A1TV
+iMw9JcnMcR0uFlpwDSNeW2Gy2yHOs54uneoaWiSkD0a2PsicmcciOyPwWjGqb9+qWDMyeYFgfEo5
+NaXEUMmkClJmSbLrPmua5D9oziflyq4k+YT09V+D/+z+D1vh/O9/avWNPP/X3Fzof80nFPZ/GI30
+9o+v2b3/DIZLqnxK1m5cTvlRUSL88Cmm+/DlqXu9CFHIwT8Pwq4xsu1x1+Bet7XeaLz94v7fgNzL
+w//GZn1h/30uoQj/mSWQ3goQDaPhSe6EXYiWmW7GedXwHYynepisfAHvzzZk4X/kCBWex6UApp7/
+1Jt5/q+xscD/cwkF+KclkAZ7EZEFcbT9ENEA/Cb0dbzVK6cCZHGiA8RzTAmIV2H8YfN2sUk8RcjC
+//WAfwEB8Cnw36gV/L+2gFtewP88QgH+cQmkwZ/eS/S/Iicl9/MAojQBPz3GsH8tDPiXSJdiCv0p
+aoAfCb8N7JtEU/rJRUtmlUAJ5Xg2U0Zxm7VIkbqbUaRG7zDdTLZr3QwjfWqpP91N6U9DrOsopary
+Hztnnb/NKCXD9ZKRKLJovhCjNx32086efEkMpKOGEN7GuX0mlaRx8ajDIAwU/KOmpOTJdnySPEGe
+6cl7/9eHDWWRuiQ7JM6F0GhJ8nah+1t91+/xovb5j3u7Z6fbs6iep+BzaYGz/+4hi/+/BPU/A/1f
+sP/XXPj/nVMo4P8c9X8/7S8LTyD9E8I/Q/YviP5nFHLwH4TGE8h/FPQ/W/WF/ud8QhH+YQlkNgB8
+z+0AaODZ0H2D9VHxLZL7z1z/ZvYBqkJsBPiY7AT4JraCwcL645OEGP4NfqWiKa/g8Y0AI4w/zP5v
+s9FqLuz/ziOUzL9QE52f/5/axkbe/s96q7Y4/51LKOz/YvbTGEDG5C55Yv47bak+uDZDYLEn0INR
+RYQJ5EuMC+T7TJb9pSKzXKiha1uRxYCB5V6gCj6eTHUNN4T0qCZhKLArYoTn72vdd1LnLEvrAbpJ
+uR6aIUcVoE8KqsaZN5D069K/EUKW1hg8AEf9O3Q+EG+oPC2e8Gxq6dNEMWXR3HtElbv8Sre6PeGX
+TuaWP0PXvRSuDx5Z2rgM/slfPNkxdYPHMAc27fy3sZ6n/zZrzQX/N5dQhP/M7Gf2gWxKdj84HFmh
+qcaiTmyHMt8vGpytUPWs0cCMTO+WpyW7RbYtUmoQ4O1FBuIyuSa4wEWjRR4eLgrjxOYFav1IIKj2
+LFN+Ow8XcfaZs5Ie3UwF3kHLWaTHtOxF2kVC6M1ymBr0MTpVLSox5eu48Ll+iVJwWJ3D8UlKWqIm
+pAoR7dPtj9ryqxFNvWqvvmM9NGqyjPE4IjdvNrobrVXW1sTTu3dMR9Z/o/Wn7tsiRUZA0utVKbl3
+7gQjD08VYRujk4IQdsuRz1cyDoPhIdB779gP0IK0vUmXJdOkXrOVrz9DYpf3++hX9IrfrZS5eo6G
+VPS96nOLo2erKiKOIFylr3z+4eXL19W7d2IYY8NSBoqKIn06fZpk0VRrH9CU6MKkCg25y02WapnO
+6EZd/ty+owF48HpJyXB+e/NXy8uV9dDS969DxeHcSLYPye55rgFAGueRYsKJqOTai+vAWvCDXz5M
+xP/zo/+b6/UC/d8ElmCB/+cQJuD/It7P4fvtGNNzB/YEfj+G5zmszvOYHPNXPJQM1wTie0EeOlE2
+GlKql3zsm84gXpt60Iv0wrMZA3fk93hQQfK9YkTZZWwWj2ILRx4au4rl1zEqxgtjQIYpoxPo/hL3
+/ShvnE8iD8AjheYm0vVFjBGhg0oMbnaVsEB1dDFywhHaByBccN8YZKX39W/9qdm3j3d2j9qHu4B0
+KyKzG6gSR5HvMMTgy5/P358fnZ13o9xb6vIPu6ed/eOjOOpuNaYfDO9yQHaiTSdU0wgfslBkn62c
+jT0ebDGDX/zmnJ/uw+OsA/Gb0xmZaGeKfR385mwjxkCFbHhHiX+L/+a0U5+U2TrmwOGG+n68de+I
+/OassOWoR5LuSekWzLissjoiucVFZBes/gmrezyyK2jUMoirhTVHMdnVivCjjuNVB68RNlbx5D7+
+MOYTXLIqaW+mGwbVp6p937XJhCZdiU+fgD43XF/PtYs6JAnunBtVYSyPjJtds3iQ4KdgLGJ6wXfC
+5sPK8nln93SFfYp7iP4EcbWr+p7MyihPqamgNLWh+LxHpuXIpe2sNEf2ACIm7mLPgGl/ggYPgXn/
+no8DdPPXC31L5Wt8ifz8ZdVHZD3CL21ST96ZLTWp1KOt8FiL06a6fuy7Vo5HqcoItdByB6rho7cm
+bCHRbMKFISZA14PEgSHaEQnMW44Z6zU7cmKI0bh8MLpJbgxFeahTlQbsIAk/SfE4WxawY2jQ5GYM
+KXTyQkmOqzr8GreNK6gPaBBZLuMWUYon7Bxvf7972n1/vn+w8/3+mVaPreYfH54cd3a7MsP2wb7I
+BDlypy9iaGY9fRG55U/i0oXOYEpX2t9UC7yU/rv0LHf8eATg1PPf9bz87/r65uL8dy6hhP6j2c8S
+gCIqSwF2uNVX0Vs1gMuJrncmEIJpz685AihaZhkH7n/G/tthw4+oB0TpK2zl5YvYYgseiiIsQiyR
+LDuiNtESM2A6HRagMauCc+0mLDkoJtClAHAvQOxoWiE84zhosnEZTcMCmyu+WIL9yxjxVJE8S/yU
+3G8J/A+Gc7b/vlk4/22tL/T/5hOK9h+HGfOPeZdqe2b4cXSBLopLHTwn+NY2iyeuCCAUD0WYOoDa
+vxMHdIhFP8vjTiFtmAANFSDyrzwpX9c7dhcDGGaY7UppMIyIunF8mzQww64nPU0BtxEMFWHKeEvS
+qyi7YOLZ3hYQED13C7arxCgwY94VxVyZ/FoJgcOyUWoXWCAzEIUn3RMNhrNSKZAT/ktRJ2rwUAKl
+DP5jW8iPtA1MO/+p1/L4f6NeX9z/zCWU2X8Xs5/eBiAm71pRGGOPeUxYumgYvmeZ/DF8v6fXYJ48
+GMbgDbnWyJfcbCAe1VkNeIi2H4NZHML7+nVFnO5jZxBFC5ONdlKf7nmpym0d6B5gEdFzW1CFSDX6
+XFUP4BFBjew2is/3BP8VbxAJAwbVHnK8tA52xXaT5p5E+i66EjvlyAnBB3LZYt6MDOWn6h2F7geM
+2oe++LCdHAKzHxL7VV+PC+lmtoSY8CPdhg/lGwLJ22Tf/JAHAayHdAv+n72n/27aWPZn/FeohveA
+NnJsx0l6nZe+hpBCSkhyEsMth9fjI0uyLSJLRh9JTC/3b38zO6uP1Uq2AkbArbaNkfZjdqXVzM7O
+zM6Im9+VXtdjRX5UhO7XrYlD8FMe+qG0leOfvXHPIOuC8Rjy0dE7msQ37rkoe3Hn6Br93ghd85P/
+e7xx4jsF9qPcuTvPIIOGxj1415AJv/YCPbbTLfsXM3RLiTy8442mpP29W+gEHhuj43e4HuFDwK/r
+jWCE73GE70PU7N+jIKLw63oG9oKh1LCXCPKceWMLsercZpe2jQEPyEsaDT6kg3WGi+AYNLr02bXv
+2tdp4//7iLRP2HvGJV2w5UCUTsdNFRcp9CRbcpXCqviXAla8SqUcsI32H0KztEu2kc+y+FQLJbpF
+RfSuxCItXcSmRCinfviMiyVOughfsFAMs0/l7DMQitinQYX8KxFbRk9C34FYNuNF+L2IT/+ePz77
+XjL9GW7UneEKRfgFUBFeCUUuHyLDC6EkCPn7hAuhYO5RPn1v37nzuzrl8n+eebvWHeCq/V+vl/X/
+td3ervd/lSSZ/4PZF3aAeC/yfhfmxLxVJqYDrA96c0a1gmLeakje/XVsCxm71Z+bkBloU5t9kevY
+IubBXbld/Noz9GVTDv5PF3PTG1vO2iKBrsD/Tqcn7//q89/VJAn/49lPE4EkM2MFADzjyATeaKZ5
+VxhMQAgGThRA8yauAOJzaII/hY6MefKNEllIAWP9qaNIUZoDlkY0SiILsigLsPnwZskogSzkgy6G
+GAGUYayDaklPjoRL3vfmi5SS11WSZ08aJFeqykm+qfpT07bV/2C12N8m5dD/d+8rlv/nxH/e7tb+
+vypJEv1/9z5N+OFOpPi/X56dMpfspu8XufzBRszcCy5iOy+4/ntxVt9HysN/QIkq93/dnW5W/7fd
+adf2n5UkGf/hhQgUAO+ztp/EWHih4xSd7aBmRAXwMqEDeFdKXo812Q+aG8WugC7R0Mn0IrdDFPHK
+xDhXOtIkC+3INGdxMzU9U7m2tD7rERmp/6GqvyiwZX0X3z1uNAwXT7L1GRf0K7MmaB6iGg8ZWnoo
+xtf6rVaLYuH8mtbWWUHGBIAgKMpb9+pPLG7GPo0xE1g7HwBTiQSNaUmWgMPyAnisSAIoHzrLgqQa
+BUB5ofzU06UPPS165qkMiozzloGjGgUgeaH84JK9l/TgrEbRg1OhBJZ9TEuAYnkBSFbUaOi2qTni
+x4Y5bPcESOB6mrdgYdVT3xvsTFRvnLgwCmbzfOk52ZwK0F9hVvIpJ0DFLQKibf4BqWXW0uF84mkG
+7A0We8r/URipbDwnJAJLADODVcQ2NQMeC0qA54RlSQ+8hnq5CNlmj+/1YojZkE5LZnvZlonVJVqj
+llJ1JFL1d5P9h5xKVS1Rz1n/xbM5X/78Z3tL8v+92+7V+v9Kkhz/STyZlY4DJZZk4j4RFY+OhN2g
+UryIN8gCoshPYmYS/knMj0S13KSb7LszJ84ke7p651GYCvG/uvNfnY5k/7e9tVvLfytJBfgv433W
+/wM7uWCjX0G91FGwCEoK2bNIHoeBThbg5MBDXsyRuFBVUdYsHiPhn3H++ZPU4ZAiI9xym5S4up+6
+TEd0fZtk/9nQJ54bMjOOJjchbDZsdzKkIxmYffUzOaykfDx/MZxp6IECdsQ/b+/uYDBXes0RtGFk
+gwWt6Y0AUPMaj0gNAQYveeeGHjyL0SyOoifx4cu4HV57npD9WhL8PaaY/vOL6NTYOt1ARTbeRfxf
+W/L/1NvubNf+n6pIxfOPOqj1MAGr5H/AAmT1v1u1/79qkrT+MxuI1OrP7rO8vr2Y2G6AAkD0nsRM
+BZF3lNy9ZO1/I6Na9m1BazLnLbXQYpPIRD/t8Skyrv2zAW3xMNKQKg3nWjDFB7iL6ybzFjYtFpo/
+stGQEatlWBjsztKHsEajl8MhLtBDWsCHjGdm3Tgc2nwRTF0Hr7xwtMB/Jy7+vtOuNejDcYPh2A0d
+Y4h2s8NIaxz1ZgM7wj1W85cRWyuT2SMKQV+Y5pxbQdqomn0fWsDjjBYKNy0mP9DR0AiwdKby/GDw
+PHL4/PRgcCC6eyZlNGqdzY/08v2pNfP7D7BZM8M7CKxBSQ6C6bjZDzurhaIf5uAqt+IQOQyqXYbX
+yAqJ8iwM0hG7oTel+eCRPJrisN136oDEPLPb/YesIoYTTltVzjxeACgh5Ic8H/BIzJ8kBUxolCqz
+fV5mCxayMzcMeAFcoaTNqK036xSv/5yWfwH3n5/i/7OzW/N/lSR5/kehZRsqbOxhFbQ0uwr5b1uS
+/3a6tf1vJUni/zLTL5gC6/rG5KefstrgzcOffqJmjAnUp5pV4Ag6C5uEQb/Cqmna7hzZLhJBJoIh
+WINNlZVzaY1ua86klueuLeXh/zplv5hW4f9OJ4v/vZ2trRr/q0g5+O+IJz+dDfjLHgH4HfYyl+xe
+2gReWfnnP+9m7wt9ru9seAJMsvYnqoJbtw3DdNzSFrUAsvz5N4f9pZXC34yAVMZ/nQ17nSRgFf5v
+70rnf7rbtf1nJUnCf5r+NAngOXmrPn7SFh4epSq5i37UnK31/CZe3/l9OVUL2b6kvk8uA5ppt0xT
+Aq23nzVS4ShkJI68Rh0eHD4/4mGu0nKQZYGv5P6bGXhPjy9iQCxDhIPtIjDfSuisHPxHDqvS839d
++fxfp7b/ribJ+M8Y7DT6Y8YG+5V4/5OT1y8zpKCACDConAaw64QEsFseBUbXa96+0pSD/zPtaq3L
+f4n4T5L/t0631v9UkmT8x+kX8J9lZFZ/z/V9FRfosevN+OY/PhBcQAIIDpEAdp2QAHZbI/5XSDL+
+4zZovQKAlfv/rhT/fbe2/6omyf4fcRecdv6I9yL2oy9n2vxvynKANez9scv1bf5T0Jbt/lHuUXbz
+jyBLe5LFuuynlFF41UKAHPx3A2e9UeBX4r/M/2/1avlfJSnH/ytOv+j+leWINKB1ejRQLp++WAe6
+M/hrRPg0vBLeICVX0wN4NuZJenB0cvTyaHDxZnh2Pjh7NchxKo1dlXcqzWrzf74NciDj/8QYVSz/
+35bOf/R26vh/1STZ/48xEnR+cJvxAHv6CsM4hJPCuF6sDePz8Srm8tkNWXjPrgzLU9S5QsKyy8HB
+4CjX/CgAJP6In2QudpRz+2iM8M9yrIDLCzH81dTyWfRCX2NeosU8lCV28MsUstEqi72kfwvDYx3w
+Oqw+c1oNv2YQLCLQc20C75S9QXc8/oa2Njn4765bALgC/zudHXn979TrfyVJxn83KwCcuBsTdzzL
+cgDPXAVrhtA4R+//Gd6/1sj7Two5/3Kkw0U/85xqPDs7vzj7481+ZMPKAlq0OLa43mTDYCFRod7l
+q5dPn+z74SxVKvMZAK+8AebEbSbtnhyfQjNqj4/czFh0shqRoWbc6uj0dRktBz1z1sBT9ntU6JPa
+xf/xzPm3sL2p04ok0380U65U/tPZ2srS/95uHf+tmiT7/4DpF/x/wP0G/ugZ+n82N53fn75gpiCC
+EUjBrpATIih9eXAaqUqTOyBEZQihb1wBTfrY3KMoWr7SfJDAYPSfaqjI77X8aZNWibdUlQBSjeLK
+whDTTaDX1uoO8WQiyyIDf83xb0xvH8kf5sdu4tiLjtYkarBcAPUWY8xl35n0iqI3tKnDXFgGc0KO
+XW3qoeeZTtCM4oqR5TtNyu8Hr+mlS3Nyd/iljO/jRZ/8tCCAZfb58igfZVunVhsy0P/amPV9JJn+
+X7mBba3VBPCT5H+1/r+SJNF/mv70CkA5G/RPdhV4wXKTnYBkBlCvAIUrAH/VK9aALzv/Mv47lvNu
+vQzgSv1/T/b/1qv5v0qShP9s+tPoTxki1v+m+QHX+nPJX64gkDVVWT0uEEznxIJB6oF0cbUlQLUp
+B/9dY73mPyv3f+22FP9td2e7xv8qkoz/MP0C+qNy3JnP4C97COAUv5R3fs5hgDWIAbHfX+3AX4MU
+MAJVoP7HIw4Ftv85MkF4Ffjn6VwsOA4dY59OWGuhYQWqjaeV9qfWZCrL/E7PX0bCNwxZTJdlpHJx
+r7FA7/Ts6dHw4uj8ZPj8+HJwdvEmArNKmYJvY+iZc3vIlRbfiilynb5Ckuk/uS/YqtD/V6+7m+X/
+ets1/1dJkv1/0fQLDsAoa4P+zToDYZnKFuxqAtNDrWf+5u/faeocXnOg0V4opsvhtaQj5nTtyfFp
+HlUDcB/ZjsvG8JdjdOPw4C+s8DG/w7EFa1BGNVFc+rhZovsIZcRhlG9Vum5ztfXK+ZvB87PTu64J
+BH4zXhAEYOdv2GGW84uj347/KHG+JRqrAASXuycHl0cl9V0RDC7zFGEwnRff1b9VmqTp6jeVH/aV
+H/FOqtxv/qj8yeqLirKcmlxr9rXRsrIk039v3e7fV9L/7k7W/9N2u9ep6X8VSaL/Xsb/O97rGyzC
+TTYMGHos/iImANjn+owAUtDuaAaQVnuwN5DngMozJ0A28W21KOararl/NqK40Qp6ZZxrnm+i50XH
+DFhYaZWFZFVvrGCq6rZVfE7x4OLZWayYKUE32Shj0nvx6nLw6vwu7fFdhfOsQUEyjDSNZCopAHt0
+evDkBPYi0NmQDkL21Q6syfDkHU6m0x7u2TKxWtmD4A6H/7w4OD8/utjn50Rrtc66k0z/SQxdqf5n
+W9b/dGv+v5Ik0X+uhUitAJCzwXPFBYC0IMrvr1+u9P6Xq/oprexp7q0OH+5fjk+SqN0TM+Aam5bl
+/q9uMeVLU/kXuZhbyUV/6ji5mr6MTipF8VZrlL4c4ZPxP7xes/n3avmvZP/Z6+3W8t9KkoT/sAFP
+4X54vRFeZ+W+fMvPW650+rkMa08AbWOvoBqwUZoN3zt8g5tcMAB3gLVoTvjq9fD4FDayJycML1fu
+mUt7FoXO4JtPsXT3lUuK+sMf1PJdm2y3kYfx58BAKgh5Zn3QKDY6bVfhOc2x6ZkABJkfei9GMyo1
+3BvHdjXGfDZRMcycijYbXGWujhaBiR5Jo8HC8LhNjdD058JjaeF1WSPNkFWuwznWKab/vgkfmxUs
+VPiYVNinfGX/33j+v/b/+OVT8fxD7poYgZX2H1L8v51Ozf9Xk6T1H67TDADcbuCPemUuYL3IcAIv
+YbnyHHYyCtZo3VuwgnxjEARMRiB4FRt/4E1t7/HVUjH+j1yvGv//7V43G/93Z6tbx/+qJMn+H2Ha
+BQeQeJ/x/3B4rgQY+9PGsILsHNQ6zn1RnHPz6sNUcybs81tf9PQ01JVC4K89J1WmYvzXNcNYrIUA
+rMB/wHsJ/3s7tf6nkiT7f8JpF/w/sQyRAjwfDM4vlRtzpAC6Y+QqxHOREIi+nwgG+X5i14nvJ3YL
+1Vqwe55DBqD7WNkMfY8rXoDx8DD8BX2QKkzXCDbLmqdPrWvGlmBpazKfADUAevFoWbjSyPJaXZBo
+YuKE0A4VFExQMfYvT5SHkTjCsFu67YaGPwMa0rLczXk4si2dxrFJ49iEflswhocYyQR7wXGoqmFq
+3sz1FNX9tCf5nBEZ5sjSnBb80wpug3hggWkqm2agb8J72PTd0NNNv2VbftAyhPGwPOUXRQhxyyDo
+05lrKO5P3qc9U/nOxQCzOImP8duJPpBHcXjY1HTC7bY6t8OJJXvXLagfVVd1XGryAn0IsWjhu04i
+zC2UX+mlp7/maIDLos5Gceau5/7GDze+vXHngHOs20P8TcXF/qtxTzNmeBADV8Gp6wf9brvzj8bH
+RuO+cnSroWRHuTAxgI2pnCOiKpcWIMcTDDfThzom1YFeZspfcH/Po8pDhtVKp7vbasN/nf7P7Z/b
+WA7sPsqqPviBoUw+WHPMm5oa7Aeo/b3LwLP0QB14muOjUF295CsMSsZuVaA5+1ud7a0dWAH2mqzF
+H+ohvAuUd6GHKfVsTs5Rmo7rO9Z4HFX6zQNKlZQ+PTp9Q0XQAxIjvP4IPx8LBWXsHZaVlVFl/huL
+yFQih9+9pGzJ+o+UZmwDkhufyQWsWv/b21n5zy6qBOv1v4KU4/81nnbRC2ySnfEFGZcoA7YpgLoW
+IHGRI9gUHO4ONslJOYVNMkvxBnF9dQbENMsOxLaEqgprmLmP4sg8OJmFN3b1cDVpJT0gjcztML3S
+lhxjTiT5h7ByK299a+KYhjpa7JcE9We50RrAqi0UbFSOM0gRAWIMZL6gYJm+63s0WtDOlQa1CGes
+wM+MBvOqWXeTTiPzn0VKVSR//k8032RR2Y6dCToiVy51bTx2bQNq07a5r7w5e3UxHLw6PT06GR4/
+hQIdwFNUFIr/2lcyXYstWu9812lY1EEfFq37iqrgso9Y3IcpmbdSKzorVxivbulQjPMB05HwCmxR
+VwCEUGVIEeb6vXbvu1jL6nT3tGT999wbA3I/XwSwSv63u5vd/+926/if1SR5/efTLiz+UZ648h87
+GHITr+ceCziNl8tigCdwaOWPblMrPK0afrxkRGYA8deIrhP5GuFP5fWmdMs7rAf8QEJmD+Gj4Wbu
+HoJvl1mFaTjKCiKoQHdt29RpDxPtS6OhMkTc9P2pcedGsPCEt3GrJEK6Z6L9QFx5T+H7k2L8n7hz
+zffXIQBcZf/T6WT9P+/s1PK/alKO/zecdtH/G8vJeH87f6aOoCmGgofSG9czlhoC3dUHHAJdiwM4
+BPSp3t+wbR7Ph8Y7gI5zlAnhOwLc8YC4BC5ufeYjV/OMPcS4BepH4HXxx8Fmqm6b8L2hqZ0bBsrY
+9VBuGhBSNyLAfRoW3lozFJ70eRBfLMTAxn2l2cRIwtbY0skGqb/cZTUfQmknbqw2/6c2DPrPTcX0
+f+b602r0v92OrP/dqu0/Kkly/HeYdiH+O95nDv642gwp28wdoeEHsx7MZ/ioMWP22GUs32F3f2e9
+67eSivHfXxf6l9j/Zc//7XR2a/+/lST5/IeI/nC7gT/59l/oA/Ly8jmX+CrEKoWeVmwFBlkOguMy
+YqINYmYq/C8vkPm17BlxdabsttsoM4Pq/J+Ic5OOeyOIPZIlCzX5WTWm5tyJoUWFeVyPyDcmlTmn
+eOzodmiY2fFs/thoPMcH+JFxXgeG8cJc+AP3YIIvcWH6LPuYyQMDmIYzx17E2c+BA3vhuDcOQvDj
+bFJ9HdjWtXmMB/GBmYNnyBYduqETvNRula2I2C7F/89V/PC0av8nx/+p1/+qUh7+GxkCkNX4RFjP
+bT/ugPXUIoP1PFNC+jtIaO4rB9F5Cth34YwGijtmY1csn7mmcKgFYJI7s4LAxGDFkdxKeX1+iZrz
+K9iStQDYAA8eC4/V5/IUBKgG2N98DqCmsNMzHeCF+gXyFqRGkQVCXqGRJiFM34GEAguGMbX4xz9U
+6ocrYuNtaDQPhOBAGfhgYg0E6v4dP/RMZeGGsNFk1iIKUHJ6KRFdgm3m1PWsD6YxhDJfGZljtIig
+USI8HM8PjXPTgzd3AXhw4k4sFPq5U2tkBWokAGic8wuYjCm+cNqaKo7beDEyGFnSYJ97bcrl5+EI
+us7kI237o9P5zfVu4NFwIFATXr1tuzcDfZ7Kh8chywyD7ahT862w83zjpOojnBL1ZFO92FSfcn2M
+/7iRAxS7B1qJgxowZNhqsAd/Bk9hDtDb8VYbK1xSsFlf6dAtfn3hHG/7W+1+p91uHLJ1TSTOW2J+
+TJm7Xyn+k0T/AdVsX9fszzcCXsX/9XYk/T+6BK/pfwVJov/xtKcXgSRTXAn+aXnms1BD2Z8JaPX6
+/DRL/9PnAAVdcPrzmomn/SIRfdlwbDGosuKtpEFy9TcVchXjfzi+qWr/18v6/9rptmv8ryTJ53/H
+N8IBYLjN+H4FnL9BxVNW3C9wfKwdY/PwKubt8Obumjcy4oG2iobLdMz45Nl5JrW63c1Anxcadj5K
+6yTcmA/NU01kAKPJYru/gxGiNkOjuIe4mWGOtdAOMAwksF4OdIz8RV4N6gDY0ImbrWK7kwnmYQUc
+flygqsDe6GZkm5o3mmKyleA/SvHWeOgzlRiO3+n8Z7e3tVOf/6wiZeZfC8L1+v7HtGr/v9XJ0v8e
+uoSs6X8FST7/iV+AcAKUZWQ8v+DHksTLWzg6uUYw0fA/T/97MHh1fDo8PRu+PHt6/NubIXMs1bmj
+fwjfhH1Viz5RYhSnaPChqszQD72lxDvMJbwjdylIWmMGbIU/wUzNImeC2WqJl6zUQsOKy7KpVJl+
+0RMMMaaqalg+O2URzlXN89wb5EtzNdg0GNln2X3lBLXlqouCxXH44cMimUs2hcpoES1JewrGL2Rx
+DNg80/tU0HWZQq7PTGZVquu4g2Xbb51Fh4dHtGBVwkaNdHNSZJPK3B+OLRsARLNEvQ9n5AWjyYbW
+bGDD4dgz34emoy+YX7Fps2HibA+hX5MxHAT2a6PTd5cy9H+krdn3I6bV/H9W/9tr79TnfytJ8vlf
+TXD/CLcb8Kdr2fCPh1pARACwM9BuFXR4bsNfADxq/pYAIdOWAK/iLQG7IT4fAxs+SPPl1HMuS7vH
+DYOgDZFuxg9z77sslxnOJ2ZBACveyJPjd3yoUpZA0FRU7MAKNTVn5n5Tc3yrCbd+sLDxFuhcs1BO
+gSPI7i5gRPLzrnSO+PLg9Pzg2dHFfhMXBF15iJ4m1dEtc3AWKCrbnCnq/OFKz2FZ/HcDWCeqjf/c
+2dqV+L+dbm3/V0nKOf+PX4BAAoJZ1gEAagIQaQi/YfsM3IkrSQI4shPABN/pPmW5m3vEUgusGf8c
+FZUOCBMrieyIau4pBxeHz4FaGPOrCWMhgfujc6doTBd6SCF0zTeVB1gRtR3azNjp/UvzZvQ7HT9W
+9vaUHx/zYzfUV18JHT+cI5YhV5OC11ceEqhf/ru7B4gI/FgH2pu+pu8pr5FuJUJOPPcbo7B6ozz8
+r7+gcGj+f3tP19w2juS+rn8FT/aVNlkzlmRbmnFKDx4nmUnV5KMS7d3WpbwqmgQljilSBZK25Iz3
+dX/BPd7D1f6A/U/zS7a7AfCbluJh6MyEnYpFgCDQJNCNBrrRbduMxNPbbizUCgcFtAl65gJP8cJJ
+IDwVIDoHnLkM3iI4EA5sH1FTH/9rd/fxwe1TbQLNLi6RY8EnCCLbdlZjPPkLxUJuLLUuX6CWe2/S
+1Z7/9eVEe/l6ok2ev3v1VMsiuzf5ZHyUS7IDwOZW3p0iZle3eh8u8FPdIi7pc0L6jGUOYe9NJCsO
+/eX+HP5syY8FLpJZpZ3x2q4xC8530KsZyYlBZwefRzdn0IXTcE3js2MyN3Ci4Cvy810FOf5vMTes
+OfrrZvnveFhc//fa+H+NQIH/0whIs3+RkVv/k8ynp2U+zXJsG+PcV+0Io9trWRfNC0k6nhqSLGWt
+DTmSQ2D1W9ptO6Ecx3CVEds+4En/850/Epbxq+18SG0cwF1s6YVallIRYK4gYPmcFsxQnjKhpGdc
+OTPBagidPwaOhX4cdfyNM1ETr3vR4oLx4IszdczTf2Q3v/4bFPf/esPW/q8RKNJ/ZGeoH5JZ2n/m
+BJdaFKDnV/8Kj4uy63KCp0eJ1PEqJnJMSJIuEvRDf46vDgr0X3fwjz9spv+S+O+DYav/bQRK6D8b
+/4PShXOfarqEaTnmBiFnFec+rUgX1UhuEIRpdhDEU3y03QSPj5TsakuPNS0r+RTI0T+7qV3638b+
+K2//C/N/q/9rBAr0DyMgTf6YrPb5ii5BUPbH8A/lpE/PE9njVUz1mBBE7wbbET08cUCbrqmTmCiU
+R3y6NFwWQuEdDdgRZyYqsk60j6iLYjPuR551on3nRky73cEdVGZG5GwsX+R74F8elQmgCce7zBc4
+Wxt4/6G7rFbI0b9dk8l/BjbSfz9//udwOGrn/0agQP92xvrftvZtC4MilgUAJxaAN6uW/Lali2eJ
+AahUzASgqSrFj2i0HsWPbeX0PoRFu/IgyNP/TfPr/8Pe8bAw/4/a/b9GoEj/N5n1PyZzil9BpTq5
+uBLGI3fygBu1C4BXCe3flO3mletNoey2JjNYFP/reqURNz5DZ/+UyQ6U56a0/xHuz3K36BH7gv/p
+kfaRrhGIv2gX3PDMeZwpksDKZmitQwlAxSCkU5hoM1R8wZv98Pz0GSQR45+1APDvBgdPHmsHB0+D
+Xc4WfgiE+eFvB+ePD3Z3u4/iZgB9D3AUDUjMsUX4BHSGKblHj9yKF7h0XLfkFZaOFefANSC/RFcV
+K4mXvoA3EI49qcuDcR/uGNeXWvcjKd20vcFtETeoSSJG2jWZ8bO2Mvgs0HSuITZ57L79stDT9G8l
+hgUDKxoYUgqVOvkX//Ni+uz5i9O//DiZvnk7eT/uIGK4Oz4e9v4TsHSNNfTNWC1TYYj6HNAek3QJ
+fY9KTIbbafo10JN/Peb48Ak8fHKNyjx4APLHXTPkrn5wEvqzmcvUM121Rz22Zye7Zs807OP9i9mJ
+3t+fuye7I8MY2KNUmT+nCsH14NsBOxpAUbgeWaaN3lZzRGhtNktIf4KzN69enb5+Nu7Y+GakeEOy
+xEiZS928tihYkrPC3nMsCwRvXWcrcVwW9+07+XrPJu9+nKaq3StprPDQKd4rQ8X6JFSg+zdacpR/
+DYm1Gg+ys7QuWWlIqxGlGlCdY7jXxhqTpDgAOp4x7WTQ62kfb7sluMDCaDtcxMcooILPw1eBxQ82
+CYPTHQ/yuKiWH3q2aqFuyMl/c8Yt3rT+96hfiP901GvPfzcCBfmPRkBaAhQZVQZA4uzrr4oBmDkW
+KAYgcrPskcC5MhRZRKvtNoyoplLjZ7qTO7b+0P3wUJCjf+glsxaff2nYqP8ZFeN/HrbxPxuBAv3T
+CEjTv8go3QPGW+jgGAWJqvWffJxWgOI6XgOKpKDr5ZbbwPRMWRh2ywmg7Pp8J5j719NwzmFNEB8L
+IGEmPlZwSla6D/3lvwzI0T908aBp/W8fD3vl6L8/bOm/ESjQP46ANPlDOm/8ZdgM7aLEYXk6AwAL
+WL/85H/OWjeiVvRFwTh39c1wOjx6pJ2OxZW+iAL36VPNQBNcZbaLt2VGfJ8vrkbuz/RDf4ciMcS/
+VJ4vVFnn8Jvhz87wmyHm46+6EdsAc3S9+XAGwK8clwVnsOJbME6k+Anmv1bG5pdvZfQryB3G/5PZ
+zSfikzX/xYX0j+h5WN/7eHqraiT3reLDPpPFgR9DnVY38w01eBUkwtWNnUdKP0Pb5FRFz1chmh5U
+1kPKgNjCeKFhoAdRZ14tgANbzD188fVqA4r8H/cm650CNuv/8/q/o9Fxu//fCJTxfxwBmSlgVqb9
+C9kqVMdFq/X/qjohAKpULAKqDEGIdLmVGCify5/KChYGD3WcWVLKBLkF9u7l2+/fPX87PXvz+sXL
+76fy1C5FkZdZmUDyoubbXEu/O7ExR//BA+j/+3jYK6f/H/Vb+99GoOj/L+v9r6D4R7U87jwDTbiG
+yUpJPyZvePxXioGRd4nOLnWKa7BRKCwvnRIRpUR4NcoVnXkRMy6cuS3Ll0mR1U/E8mNgPaT4aM4X
+rgck/LmlRmAS1TJjEYmsqBhYOv7WISgmeHyymChMSCYZbCAhYoapSr5DOlhrno9uDWCJs7W0ma81
+J3kCVYj5LmAPboeS5/+sNq/PCWzi/73RccH+u43/1wwU+T/LOYBmBf/vk0W02mrn/14BwH/yg/mC
+QYuXDg3H+oKA52vGsCCJVmFfKDrUyTPK2j5YCNYnqCezKSl8qEzlxzrfCYRz0Kn6NGOt4105i86O
+VMemb2yp5tWEApc4kI5WILrumOiOtKDDBdblwgdx4ZZrUNp20FvBh2vHtUyDW+fnMHWHIW7tQvt/
+p9Yed6qRfujB28Kvhjz/h64O5k69GwCb+P9hwf7vuH/U2v83AkX+L0dAZg5QeTlLQPh2/sK5IX8N
+NH5QpbNYhvdSA2c8falhyIO8Hjj2+LVmgTCJ0jEGgFjIf/fydXYVH88Ht1uycdVwiosbljX12DXZ
+OyYKJWKFUxXHaawd93o7ts8XBiY6e4AxslZzbqAcyjiw/shEZdk0WC8ufMSi8+GX//vX+Z8gYeHO
+B/MedXYY5z4vL8KZ9QirjI84nO/Ae3jCV/bUZd4snMMjhyqXTUN/SiFV4xeG2WEqDAMBnbgNrSNv
+iXCf8MJzoTvr/PKP/9/7SH69bjs7Fqw7+IzJG/9L96jkVJT45R//3Pt4weawQJyqZ0RSPPHPpKoq
+Q0/19be19ozLxxdpN2nCJYgNleiY3dovlUGO/6PU0/j5z1HR/vuwjf/ZDBT9f6OBTdr1N6YrrH8W
+INs6S5etqpT/4mHa+qXLeGOIUkL2JrF7n5YZW7FofDQZp5JH0/4SRqRCiR+jUIi09Gqou84C1+w4
+2NQtYBJMR7v1ldbHvGvMXBoe0/N3cMaB9zeWTEd2r8VVSOleD9X36CBa+uB4SIJ3R5YzNFVAxwPz
+3IGvqXX2H4tyj08mpiqJ22R6HEIw9R6cCSNRaRkcpG7ZvhkFOoWxSGeTI2GKzBDOuR/N5ppv2yX8
+L0//4br+HeDN9j8F+7/BqPX/1QgU6R9GQIb+MZ3z+s8uiEiseGDLUDAVTIBqEEwALxMmgKmtnfxD
+4TvkAsN1jIAK6STzjbv0gO5o/cHoSQ/+9TFO1Gj4Tb/bSgIJ5Oj/xl8Be2rW/1/veFSY/4f9dv3X
+CBToX4yANAeQOTkjINS0JsettZ8i9LJ234VfYv/LjesnYrsOq8DIADCxkWLB+Imx0Ar86MaQw/Rg
+YThe5fpw+5Wh9Aa6PS8SzW+7SpGl5U+8QvkyuFBC/+sAhB7b/wwhAISM/yn+/w/p/Gfr///zQ7H/
+L2CQX88dsz490Ab+D3Jw3v/z8ajX6v8bgRL/z7L7s16gVWZ2FngN6yafX4r7jhXON7iCjatJeX+O
+a97KIawqjj5hfxumBVi0aCkQv8hDGgw4i8Bz7OSjfm7DgYS1VNsPVOOU8zirCtRmTlDA7t5WBcko
+rceeIKmv4NM8JijhSGNOW5+8POJtiXt1VW+uPOFb1VaFBw6gQxPGA/yfAtFPl/ip2D4mLcOc4nGM
+qbAWpDyPhVOQ9eJrw4KF5J+B+qnWsnP7u9prPwSikO3MuIE7Hp7kQJCFNIO/QGsuxc2V4qm7xlCf
+IJtpF6IDMEbFDeO+TngLh0B4Bmxb8S/5bJvWoxdUbJxQ+xe39izO/463cpq1/y3G/z0a9dvzH41A
+Yf7H7k9P/ZTOe/8lr+84WlDfhZlAQEBz6/INIFEFSQB0GU/+lNpq0zcelHK/97vp+x/e/Des6N5P
+xkIjV0Ws+ORGOsVCpCkad6m8/uKmm79tLiN196xwE90gqrvPCneBSambrws3Z0m93zfPHor07wbz
+ugI/SthI/8dF+/9Be/67ESjQP3Z/mv4pnaV/DDR9beBkmz5CfcchAFEHMQC6jBkApQoMQM30eFfD
+sE8wjQcadoC25M4VyF4wYEWkKX8BSwag5QB9kT579fLgIgrQNBmkacebPdX0wID1iHPDNHiB6CLQ
+Xp2eaYZlQYUgUsqgZdyBxqUXjidVfISQ2cRHsJAezKH1cVe4JcOnRE6CSzf/xE+B72UewIx0+c/H
+FYr075lW1Cz9H/cK9N/6/2sICvSP3Z+mf0pv5f/XABpe31RpgUQ9xAPoMuYBlNpKCMCS+RM/KhYe
+nUdlO9LmUbMMflkpEmA9G0kZC+m2EQAlU/nYJ5B+ybhnB7AC+uKE+XtATP9CgoM+r38D+B77v4dH
+g3b/twko6X8jMB3HY4vaPEFv4v+jo3z/D/tH7f5vI1CM/6p6PxMDNs7c4AeIM5Oc2tV3HCBuOhmX
+9Z0IKKkcDwWoMwDbm/8nFWXmJyXJJqiLDwSyaRBvWXHjOjGk8KNwGWGMLJxr0LW24WFQVgqWqkkf
+JwxNg3ToBwYz1gdRI8xxlsvIHnUqrJ3G2uBJb+P0VEL/JvfNJu2/e0eD/Pmf4/5RG/+zESjQP/Z+
+mvQpnaX6t4xxPfT1JfwKJ9AhN7zAroXssb0aCByrKZCyPHVnLvc5xhTe56breyUU/tCd0iCU0D8K
+vTYL61MAb6D//tEov/87bP3/NARF/8+q9zNeoOPMyp1g2kuZq52hIAKi5+v6xIAYA7SPTYZofaJA
+RQMFHgI0gW/xH1fbeiyLq1Jey3BzR/kORm/HnYVvRS4LOifaB1qAdkIndFlnXyQCtjS4EfpcZfiB
+usKVKHNVKlri7B8/hvZ8KqHEC5U2l5G6XLCFz9cqhct5ea0cMXfQYS7g1rmgo4GqKDW/xnwt8TJ9
+vnNb7cU77rNNS2/bHnfj0rTIFpp8HQYaFXvsPE48OkMr0P83Wmdv8uovf5VenWXO2cskHWp97TzV
+loIErypv4VTKiS+fPt1BHfzvY5Yo4f+zJciddQqAG9d/xwX577Dd/28GCvyfej/N+0VGTgLElQl5
+fptxYznXrpwgAtq9Eb5Ua2P6PrfFaKyPzcdVImO/l9GEQKjMYOLvqu0A5kFGrSvrVElV0q6GkKOM
+zbYU0lDiTtOIEiGXOm0L3xIl9C+k4hoZwEb5b1g4/3vca/f/G4Gi/y+xJkq7/xI5ubO/rh/hAUyf
+49Y/rqay+r9fTfuiVTkY66P/TLUVC0RaHBaFO8ktFpdoVa4vyT6r19NSTskErqVshCKO5IumSU28
+gjkHYVAbllSbKVvGBHZ2tffMjLgTrsWuE2TcWQka1xvAn7Q3p1GIPtwumSdUomamc03OLOaFjuEG
+T6iRUHt39uOb188TV2rv36OFJfOuHO57GDMeLa6YZ/L1MiTLK4GF2CwwQo0DE9yHutDrBVYNDBXE
+ZgzDvAoVInhHzDHJR1miHEs7jYBKlaApu2FL63xZWv6gQlk6Nq0MIPPbV/qkoIz/4/BvUv476uf9
+fx/DRcv/m4Ai/yfml2b/lJH3AucKpj8Hepdi311OIEUVwgUkXScOICkp+S7R4D7tOG5ri0nPb1xR
+msurcVcU1Q30DYA7FuMl92doCDL4PShy7wkl9B8yw7UYqy8MyCb5r1+I/3E8auO/NgPF87+y9zNn
+gN1CBBDhAhby0QGYtsQhVIPspxqvQd5TVaXWeenTxIh5CTKUr+vR0oKFWn72vy9GaGGOZxIrKwcc
+71rLAdJbukaQ73xnfAT4PlPsL55UJTBCzy9R6E8lfsrVTcJ55RlreIto3M28TPcr5Z6/fSjh/6u6
+PUBukv+GBf3v0fCwtf9oBAr8f5VR/KzyGh8Z+eWHyeQtLBMdWLzVt+S3ItMwXAYDsL71flJnxWIf
+D6nt4zk0p8zUo1zoXN2lw8isLqHkCuXNGfMYR64qF5isOj7pVyuKttBCCy200EILLbTQAPwbwRPy
+6gBYAgA=
