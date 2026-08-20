@@ -1,4 +1,4 @@
-# User Guide
+# Power User Guide
 
 This guide walks through creating your personal dotfiles repository, managing machine environments, automating updates from upstream, and provisioning new systems.
 
@@ -8,26 +8,23 @@ This guide walks through creating your personal dotfiles repository, managing ma
 
 `rigrc` separates your personal environment settings from cross-distro package definitions:
 
-- **Upstream Engine & Package Manifests**: Maintained in `rigrc` with multi-distro definitions (`apt`, `dnf`, `pacman`, `brew`, `cargo`), pre/post hooks, and default configuration templates.
+- **Upstream Engine & Package Manifests**: Maintained in `rigrc` with multi-distro definitions (`apt`, `dnf`, `pacman`, `brew`, `mise`, `cmd`), pre/post hooks, and default configuration templates.
 - **Your Personal Repository**: Contains only `rigrc.sh` (the self-extracting distribution bundle) and your personal configuration files (`*.conf`).
 
 ```mermaid
 flowchart LR
-    subgraph Upstream [roypriyanshu02/rigrc]
-        Engine[Core Engine] --> Bundle[rigrc.sh]
-        Manifests[packages/**/*.conf] --> Bundle
-        Defaults[default.conf] --> Bundle
+    subgraph Upstream ["roypriyanshu02/rigrc"]
+        Engine["Engine & Manifests"] --> Bundle["rigrc.sh"]
     end
 
-    subgraph YourRepo [yourname/dotfiles]
-        Bundle --> Sync[GitHub Actions sync-upstream.yml]
-        Config1[work.conf]
-        Config2[personal.conf]
-        Config3[server.conf]
+    subgraph DotfilesRepo ["Your Dotfiles Repo"]
+        Bundle -.->|"sync / download"| Script["rigrc.sh"]
+        Config["custom.conf"]
     end
 
-    subgraph Target [Any Fresh Machine]
-        YourRepo --> Run["./rigrc.sh --config=work.conf"]
+    subgraph Target ["Target Machine"]
+        Script --> Run["./rigrc.sh --config=custom.conf"]
+        Config --> Run
     end
 ```
 
@@ -46,16 +43,21 @@ git init
 
 ### Step 2: Download `rigrc.sh`
 
-Download the latest compiled bundle from upstream:
+Download the latest compiled release bundle:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/rigrc/main/rigrc.sh -o rigrc.sh
+curl -fsSL https://github.com/roypriyanshu02/rigrc/releases/latest/download/rigrc.sh -o rigrc.sh
 chmod +x rigrc.sh
 ```
 
 ### Step 3: Create Your Configuration File (`custom.conf`)
 
-Create a configuration file (e.g. `custom.conf`, `work.conf`, or `personal.conf`):
+Review the default upstream configuration before writing your own:
+
+- **[src/base.conf](file:///home/roypr/Pro/mydotfiles/src/base.conf)**: Baseline environment variables, shell settings, and core dotfile templates.
+- **[packages/](file:///home/roypr/Pro/mydotfiles/packages)**: Package manifests organized by group (`shell/`, `dev-tools/`, etc.). Each manifest defines package manager targets, bundled dotfile templates (`[template:...]`), shell hooks (`[bashrc]`), and environment filters (`cond`).
+
+Use these files as a reference to determine what to inherit, override (`:override`), append (`:append`), or suppress (`:disable`) in your custom configuration file:
 
 ```ini
 # custom.conf: Personal machine environment
@@ -125,10 +127,10 @@ git push -u origin main
 
 To keep your `rigrc.sh` bundle up-to-date with upstream bug fixes, package additions, and distro adjustments without manual downloading:
 
-Create `.github/workflows/sync-upstream.yml` in your personal repo:
+Create `.github/workflows/sync.yml` in your personal repo:
 
 ```yaml
-name: Sync Upstream rigrc.sh
+name: Sync Upstream
 
 on:
   schedule:
@@ -143,9 +145,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download latest standalone bundle
+      - name: Download latest release bundle
         run: |
-          curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/rigrc/main/rigrc.sh -o rigrc.sh
+          curl -fsSL https://github.com/roypriyanshu02/rigrc/releases/latest/download/rigrc.sh -o rigrc.sh
           chmod +x rigrc.sh
 
       - name: Validate configuration files against new bundle
@@ -155,7 +157,7 @@ jobs:
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: sync rigrc.sh with upstream"
+          commit_message: "chore(upstream): update rigrc.sh release bundle"
           file_pattern: "rigrc.sh"
 ```
 

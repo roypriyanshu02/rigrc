@@ -8,7 +8,9 @@ This document covers the complete syntax, inheritance model, section modifiers, 
 
 Configuration values and templates merge down three distinct tiers:
 
-$$\text{default.conf (base defaults)} \longrightarrow \text{packages/*/*.conf (package defaults)} \longrightarrow \text{*.conf (user overrides)}$$
+```text
+src/base.conf (base defaults) -> packages/**/*.conf (package defaults) -> *.conf (user overrides)
+```
 
 - Lower layers provide defaults.
 - Higher layers append to, replace, or suppress lower layer settings using section modifiers.
@@ -32,9 +34,9 @@ User configuration files sit in the repository root and define machine-level cus
 
 Modifiers control how a section combines with lower layers:
 
-- `:append` *(default)* — Appends new lines to the lower layer content.
-- `:override` — Discards lower layer content entirely and applies only the new definition.
-- `:disable` — Suppresses execution of the section or stops template deployment.
+- `:append` *(default)*: Appends new lines to lower layer content.
+- `:override`: Discards lower layer content entirely and applies only the new definition.
+- `:disable`: Suppresses execution of the section or stops template deployment.
 
 #### Complete `.conf` Example
 
@@ -97,9 +99,9 @@ Every package in `packages/` is defined declaratively in its category folder.
 | `binaries` | String | Comma-separated binary names to check in `$PATH` |
 | `description`| String | Short tool description |
 | `scope` | Enum | `system` (uses package manager / `sudo`), `user` (`~/.local/bin`), `script` |
-| `apt`, `dnf`, `pacman`, `brew` | String | Native package manager package names |
-| `cargo`, `go`, `npm` | String | Language package manager targets |
-| `cmd` | String | Custom shell installation command / fallback script |
+| `apt`, `dnf`, `pacman` | String | Native distro package manager package names |
+| `brew`, `mise` | String | Cross-platform / runtime tool manager targets (Homebrew, Mise) |
+| `cmd` | String | Custom shell installation command / script |
 | `pre` | String | Shell command to execute before installation |
 | `post` | String | Shell command to execute after successful installation |
 | `alt` | String | Alternative tool replaced (e.g. `alt = ls`, `alt = cat`, `alt = cd`) |
@@ -155,7 +157,7 @@ fi
 
 Conditions gate package installation and template deployment based on the host environment:
 
-- Distro tags: `debian`, `ubuntu`, `fedora`, `arch`, `darwin`
+- Distro tags: `ubuntu`, `fedora`, `arch`, `darwin`
 - Architecture tags: `arch:x86_64`, `arch:aarch64`, `arch:arm64`
 - Environment tags: `wsl`, `container`, `vps`, `desktop`
 - Negation prefix: `!` (e.g. `!container`, `!wsl`)

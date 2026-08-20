@@ -1,4 +1,4 @@
-# Contributing to mydotfiles
+# Contributing to rigrc
 
 Thank you for contributing! This document outlines guidelines for submitting package manifests, upstream improvements, and bug fixes.
 
@@ -6,9 +6,9 @@ Thank you for contributing! This document outlines guidelines for submitting pac
 
 ## 1. Golden Rule
 
-> **Never edit `setup.sh` directly.**
+> **Never edit `rigrc.sh` directly.**
 >
-> `setup.sh` is a compiled distribution bundle generated automatically by `build.sh` from `src/` modules, `default.conf`, and `packages/`. Any manual edits to `setup.sh` will be rejected by CI.
+> `rigrc.sh` is a compiled distribution bundle generated automatically by `build.sh` from `src/` modules, `src/base.conf`, and `packages/`. Any manual edits to `rigrc.sh` will be rejected by CI.
 
 ---
 
@@ -24,8 +24,8 @@ All packages live in declarative manifests under `packages/<category>/<tool>.con
    - `dnf` (Fedora/RHEL)
    - `pacman` (Arch)
    - `brew` (macOS)
-   - `cargo` / `go` / `npm` (Language package managers)
-   - `cmd` (Shell fallback for user-space installers)
+   - `mise` (Polyglot tool & runtime manager)
+   - `cmd` (Custom installers)
 3. **Set Scope**:
    - `scope = system`: Installed via system PM with `sudo`.
    - `scope = user`: Binary installed to `~/.local/bin` without root privileges.
@@ -43,10 +43,10 @@ Before opening a pull request, run the static analysis and formatting tools:
 
 ```bash
 # Format manifests and configuration files
-./setup.sh --fmt
+./rigrc.sh --fmt
 
 # Run static syntax and schema validation
-./setup.sh --lint
+./rigrc.sh --lint
 ```
 
 ---
@@ -79,6 +79,6 @@ make test
    ```
 2. Commit using Conventional Commits:
    ```bash
-   git commit -m "feat(packages): add helix editor package manifest"
+   git commit -m "feat(packages): add helix editor package"
    ```
 3. Push to your fork and open a Pull Request against `main`.

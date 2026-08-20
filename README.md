@@ -1,16 +1,18 @@
 # rigrc
 
-*Fast, standalone Unix environment bootstrapper in pure Bash.*
+*Declarative, high-performance Unix environment bootstrapper and dotfiles orchestrator in pure Bash.*
 
-A compiled, single-file Bash script to set up Unix systems. Installs packages, configures baseline environments (`.bashrc`, `.inputrc`, `.profile`, Git), wires package configs, and aliases, and applies best practices out-of-the-box so your machine is ready to work in minutes.
+> **Note:** Currently focused on CLI. Desktop and GUI configurations are planned for future updates (contributions welcome).
+
+A compiled, zero-dependency single-file engine to provision reproducible Unix systems in seconds. Orchestrates cross-distro package managers (`apt`, `dnf`, `pacman`, `brew`, `mise`, `cmd`), automates modular dotfile deployment, injects optimized shell environments (`.bashrc`, `.inputrc`, `.profile`, `.gitconfig`), and manages atomic rollback snapshots out-of-the-box.
 
 ## Quick Start
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/roypriyanshu02/rigrc/main/rigrc.sh)"
+bash -c "$(curl -fsSL https://github.com/roypriyanshu02/rigrc/releases/latest/download/rigrc.sh)"
 ```
 
-## CLI Options
+## Script Options
 
 ```text
 USAGE
@@ -20,7 +22,7 @@ OPTIONS
     • -c, --config <file>        Load configuration file
     • -v, --verbose              Show verbose command output
     • -f, --force, --reset       Overwrite existing files and bypass locks
-    •     --profile <name>       Run specific group profile
+    •     --env <name>           Run specific environment
     • -y, --non-interactive      Run headlessly without interactive TUI
     •     --verify-scripts       Prompt before running custom scripts
     •     --list                 List available packages by group
@@ -33,14 +35,14 @@ OPTIONS
     • -h, --help                 Show help
 ```
 
-## Custom Configurations
+## Declarative Configuration
 
-Configure once, deploy anywhere. Define your packages, aliases, environment variables, and dotfiles in a `.conf` file and take them across all your machines. Read the **[User Guide](docs/USER_GUIDE.md)** to get started.
+Define machine profiles, package sets, granular overrides (`:append`, `:override`, `:disable`), environment variables, and dotfile templates in a single declarative `.conf` file. Deploy reproducibly across servers, workstations, WSL, and containers. Read **[Power User Guide](docs/POWERUSER_GUIDE.md)** to architect your setup.
 
-## Contributing & Development
+## Contributing & Manifest Development
 
-To add new package manifests or contribute upstream improvements, see the **[Contributing Guide](CONTRIBUTING.md)**.
+To extend package manifests or contribute engine improvements, see **[Contributing Guide](CONTRIBUTING.md)**.
 
 ## License
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-0284c7?style=flat-square)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-0284c7?style=flat-square)](LICENSE)
