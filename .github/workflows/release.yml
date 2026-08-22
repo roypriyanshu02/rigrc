@@ -1,10 +1,9 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [ "Test" ]
-    types:
-      - completed
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -16,11 +15,6 @@ env:
 jobs:
   release:
     name: Build & Publish Release
-    if: |
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       startsWith(github.event.workflow_run.head_branch, 'v')) ||
-      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -31,7 +25,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           fetch-depth: 0
 
       - name: Compile standalone release bundle
