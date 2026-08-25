@@ -55,6 +55,7 @@ _lint_manifest() {
     [[ ! -d "$PACKAGES_DIR" ]] && { log_error "Packages directory not found."; exit 1; }
     _ui_header "Running Static Lint Checks"
     local errors=0
+    local NON_INTERACTIVE=true
 
     _preload_all_manifests "$PACKAGES_DIR"
 
@@ -116,7 +117,7 @@ _lint_manifest() {
         local fname
         fname="$(basename "$cfg")"
 
-        local raw_line line
+        local raw_line line in_tmpl=false
         while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
             line="${raw_line#"${raw_line%%[![:space:]]*}"}"
             line="${line%"${line##*[![:space:]]}"}"
@@ -124,7 +125,13 @@ _lint_manifest() {
                 local header="${BASH_REMATCH[1]}"
                 local sec_type="" sec_ident="" sec_mod="" is_valid=0
                 _parse_section_header "$header" sec_type sec_ident sec_mod is_valid
-                if [[ "$is_valid" -ne 0 ]]; then
+                if [[ "$is_valid" -eq 0 ]]; then
+                    if [[ "$sec_type" == "template" ]]; then
+                        in_tmpl=true
+                    else
+                        in_tmpl=false
+                    fi
+                elif [[ "$in_tmpl" == false ]]; then
                     log_error "Config $fname: Invalid section header or modifier syntax: '[$header]'"
                     errors=$((errors + 1))
                 fi
