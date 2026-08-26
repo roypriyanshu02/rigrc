@@ -14,6 +14,10 @@ trap cleanup_test_sandbox EXIT
 echo "▶ Running Script Smoke Tests..."
 
 assert_success "Script --help returns 0" "${SETUP_SCRIPT}" --help
+assert_success "Script --version returns 0" "${SETUP_SCRIPT}" --version
+assert_success "Script -V returns 0" "${SETUP_SCRIPT}" -V
+assert_contains "$("${SETUP_SCRIPT}" --version)" "rigrc ${RIGRC_VERSION}" "Script --version outputs version string"
+assert_contains "$("${SETUP_SCRIPT}" -V)" "rigrc ${RIGRC_VERSION}" "Script -V outputs version string"
 assert_success "Script --lint returns 0" "${SETUP_SCRIPT}" --lint
 assert_success "Script --doctor returns 0" "${SETUP_SCRIPT}" --doctor
 assert_success "Script --doctor --fix returns 0" "${SETUP_SCRIPT}" --doctor --fix

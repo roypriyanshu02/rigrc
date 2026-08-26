@@ -375,6 +375,7 @@ _export_diagnostics() {
     cat << EOF > "$outfile"
 {
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)",
+  "rigrc_version": "${RIGRC_VERSION}",
   "distro": "${distro}",
   "arch": "${arch}",
   "package_manager": "${pm}",

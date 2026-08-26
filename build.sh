@@ -19,7 +19,18 @@ MODULES=(
     "$SCRIPT_DIR/src/main.sh"
 )
 
-echo "Building standalone script: $OUTPUT_FILE"
+# Resolve build version (environment override > git tag/describe > dev)
+BUILD_VERSION="${VERSION:-${RIGRC_VERSION:-}}"
+if [[ -z "$BUILD_VERSION" ]]; then
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        BUILD_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
+    else
+        BUILD_VERSION="dev"
+    fi
+fi
+BUILD_VERSION="${BUILD_VERSION#v}"
+
+echo "Building standalone script: $OUTPUT_FILE (v${BUILD_VERSION})"
 echo "Bundling ${#MODULES[@]} source modules..."
 
 # 2. Prepare compressed asset payload with checksum
@@ -101,11 +112,20 @@ EOF
 for mod_path in "${MODULES[@]}"; do
     rel_path="${mod_path#"$SCRIPT_DIR/"}"
     echo "# ── Module: $rel_path ──" >> "$OUTPUT_FILE"
-    sed -e '/^#!\/usr\/bin\/env bash/d' \
-        -e '/^# shellcheck shell=bash/d' \
-        -e '/^shopt -s inherit_errexit/d' \
-        -e '/^set -eEuo pipefail/d' \
-        "$mod_path" >> "$OUTPUT_FILE"
+    if [[ "$rel_path" == "src/core.sh" ]]; then
+        sed -e '/^#!\/usr\/bin\/env bash/d' \
+            -e '/^# shellcheck shell=bash/d' \
+            -e '/^shopt -s inherit_errexit/d' \
+            -e '/^set -eEuo pipefail/d' \
+            -e "s|^RIGRC_VERSION=\".*\"|RIGRC_VERSION=\"\${RIGRC_VERSION:-$BUILD_VERSION}\"|" \
+            "$mod_path" >> "$OUTPUT_FILE"
+    else
+        sed -e '/^#!\/usr\/bin\/env bash/d' \
+            -e '/^# shellcheck shell=bash/d' \
+            -e '/^shopt -s inherit_errexit/d' \
+            -e '/^set -eEuo pipefail/d' \
+            "$mod_path" >> "$OUTPUT_FILE"
+    fi
     echo "" >> "$OUTPUT_FILE"
 done
 

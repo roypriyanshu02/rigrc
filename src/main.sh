@@ -6,6 +6,11 @@
 # ---------------------------------------------------------------------------
 # Help & Manifest Querying
 # ---------------------------------------------------------------------------
+_show_version() {
+    printf 'rigrc %s\n' "$RIGRC_VERSION"
+    exit 0
+}
+
 _show_help() {
     printf '%s\n' "${CLR_PRIMARY}${BOLD}Dotfiles Setup${RESET}"
     printf '\n%s\n' "${BOLD}USAGE${RESET}"
@@ -27,6 +32,7 @@ _show_help() {
         "${CLR_PRIMARY}•${RESET}" '    --rollback [snapshot]'   'Roll back snapshot from ~/.dotfiles.bak' \
         "${CLR_PRIMARY}•${RESET}" '    --export-diagnostics'    'Export diagnostic snapshot to JSON file' \
         "${CLR_PRIMARY}•${RESET}" '    --doctor [--fix]'        'Check system environment and repair missing paths' \
+        "${CLR_PRIMARY}•${RESET}" '-V, --version'               'Show version' \
         "${CLR_PRIMARY}•${RESET}" '-h, --help'                  'Show help'
     printf '\n%s\n' "${BOLD}EXAMPLES${RESET}"
     printf '    %s %s\n' \
@@ -126,6 +132,7 @@ _parse_args() {
                     _doctor_check
                 fi
                 ;;
+            -V|--version)                         _show_version ;;
             -h|--help) _show_help ;;
             --) shift; break ;;
             -*) log_error "Unknown option '$1'. Run './rigrc.sh --help' for usage."; exit 1 ;;
@@ -148,9 +155,9 @@ _main() {
     local conds; conds="$(_get_detected_conds)"
 
     if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
-        printf '\n%s %s\n' "${CLR_PRIMARY}${BOLD}Dotfiles Setup${RESET}" "${CLR_MUTED}v2.0${RESET}" >&2
+        printf '\n%s %s\n' "${CLR_PRIMARY}${BOLD}Dotfiles Setup${RESET}" "${CLR_MUTED}v${RIGRC_VERSION}${RESET}" >&2
     else
-        printf '\nDotfiles Setup v2.0\n' >&2
+        printf '\nDotfiles Setup v%s\n' "${RIGRC_VERSION}" >&2
     fi
 
     # ── Phase 1: Preflight ──

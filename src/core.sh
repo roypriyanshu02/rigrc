@@ -19,6 +19,15 @@ if [[ -z "${SCRIPT_DIR:-}" ]]; then
         [[ "$SCRIPT_DIR" == */src ]] && SCRIPT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     fi
 fi
+RIGRC_VERSION="${RIGRC_VERSION:-}"
+if [[ -z "$RIGRC_VERSION" ]]; then
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        RIGRC_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
+        RIGRC_VERSION="${RIGRC_VERSION#v}"
+    else
+        RIGRC_VERSION="dev"
+    fi
+fi
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 PACKAGES_DIR="${PACKAGES_DIR:-$SCRIPT_DIR/packages}"
 GROUPS_CONF="${GROUPS_CONF:-$PACKAGES_DIR/_groups.conf}"

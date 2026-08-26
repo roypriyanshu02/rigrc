@@ -32,6 +32,7 @@ OPTIONS
     •     --rollback [snapshot]  Roll back snapshot from ~/.dotfiles.bak
     •     --export-diagnostics   Export diagnostic snapshot to JSON file
     •     --doctor [--fix]       Check system environment and repair missing paths
+    • -V, --version              Show version
     • -h, --help                 Show help
 ```
 
