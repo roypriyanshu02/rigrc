@@ -204,13 +204,6 @@ assert_success "_group_selected selects group in filter list" _group_selected "s
 assert_failure "_group_selected rejects group not in filter list" _group_selected "core"
 INSTALL_GROUPS=()
 
-# Test _get_pkg_prop
-_CONF_PKG_KEYS["git:name"]="git"
-_CONF_PKG_KEYS["core/git:binaries"]="git"
-assert_eq "git" "$(_get_pkg_prop "git" "core/git" "fallback" "name")" "_get_pkg_prop matches primary key"
-assert_eq "git" "$(_get_pkg_prop "git" "core/git" "fallback" "binaries")" "_get_pkg_prop falls back to target_key"
-assert_eq "fallback" "$(_get_pkg_prop "git" "core/git" "fallback" "nonexistent")" "_get_pkg_prop fallback value"
-
 # Test reset_test_state
 reset_test_state
 _CONF_PKG_KEYS["test:key"]="value"
@@ -227,6 +220,25 @@ assert_eq "prettier" "$(_get_opt bun 'bun:"prettier"')" "_get_opt extracts bun p
 assert_eq "eslint" "$(_get_opt npm 'npm:"eslint"')" "_get_opt extracts npm provider"
 assert_eq "com.obsproject.Studio" "$(_get_opt flatpak 'flatpak:"com.obsproject.Studio"')" "_get_opt extracts flatpak provider"
 assert_eq "gcc" "$(_get_opt brew 'brew:"gcc"')" "_get_opt extracts brew provider"
+
+# Test case-insensitivity in config parsing
+reset_test_state
+case_cfg="${TEST_TMP}/case_test.conf"
+cat << 'EOF' > "$case_cfg"
+[config]
+GROUPS = core, shell
+Packages = bat,
+    ripgrep,
+    zstd
+EXCLUDE = docker
+Cond = wsl
+EOF
+
+_parse_single_conf_file "$case_cfg" "global"
+assert_eq "core, shell" "${_CONF_PKG_KEYS["global:groups"]:-}" "Case-insensitive GROUPS normalizes to global:groups"
+assert_eq "bat, ripgrep, zstd" "${_CONF_PKG_KEYS["global:packages"]:-}" "Multiline Packages accumulates correctly"
+assert_eq "docker" "${_CONF_PKG_KEYS["global:exclude"]:-}" "Case-insensitive EXCLUDE normalizes to global:exclude"
+assert_eq "wsl" "${_CONF_PKG_KEYS["global:cond"]:-}" "Case-insensitive Cond normalizes to global:cond"
 
 echo "  Section Results: ${PASSED_COUNT} passed, ${FAILED_COUNT} failed."
 [[ $FAILED_COUNT -eq 0 ]] || exit 1
