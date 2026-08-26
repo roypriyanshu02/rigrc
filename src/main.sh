@@ -48,18 +48,42 @@ _show_help() {
 
 _list_all() {
     [[ ! -d "$PACKAGES_DIR" ]] && { log_error "Packages directory not found."; exit 1; }
+    _preload_all_manifests "$PACKAGES_DIR"
     printf '\n%s %s\n\n' "${CLR_PRIMARY}${SYM_DOT}${RESET}" "${BOLD}Available Packages by Group${RESET}"
     local gname pkg
     while IFS= read -r gname; do
         [[ -z "$gname" ]] && continue
         local gdesc="$(_get_group_meta "$gname" "description")"
-        if [[ -n "$gdesc" ]]; then
-            printf '  %s %s\n' "${CLR_ACCENT}${BOLD}[${gname}]${RESET}" "${CLR_MUTED}- ${gdesc}${RESET}"
-        else
-            printf '  %s\n' "${CLR_ACCENT}${BOLD}[${gname}]${RESET}"
+        local grp_active=true
+        if ! _group_selected "$gname"; then
+            grp_active=false
         fi
+
+        if [[ "$grp_active" == true ]]; then
+            if [[ -n "$gdesc" ]]; then
+                printf '  %s %s\n' "${CLR_ACCENT}${BOLD}[${gname}]${RESET}" "${CLR_MUTED}- ${gdesc}${RESET}"
+            else
+                printf '  %s\n' "${CLR_ACCENT}${BOLD}[${gname}]${RESET}"
+            fi
+        else
+            if [[ -n "$gdesc" ]]; then
+                printf '  %s %s %s\n' "${CLR_MUTED}[${gname}]${RESET}" "${CLR_MUTED}- ${gdesc}${RESET}" "${CLR_MUTED}(group disabled)${RESET}"
+            else
+                printf '  %s %s\n' "${CLR_MUTED}[${gname}]${RESET}" "${CLR_MUTED}(group disabled)${RESET}"
+            fi
+        fi
+
         while IFS= read -r pkg; do
-            [[ -n "$pkg" ]] && printf '    %s %s\n' "${CLR_MUTED}•${RESET}" "$pkg"
+            [[ -z "$pkg" ]] && continue
+            local is_dis=0
+            if [[ "${_CONF_PKG_DISABLED["$pkg"]:-0}" -eq 1 || "$grp_active" == false ]]; then
+                is_dis=1
+            fi
+            if [[ "$is_dis" -eq 1 ]]; then
+                printf '    %s %s %s\n' "${CLR_MUTED}–${RESET}" "${CLR_MUTED}${pkg}${RESET}" "${CLR_MUTED}(excluded)${RESET}"
+            else
+                printf '    %s %s\n' "${CLR_PRIMARY}•${RESET}" "${BOLD}${pkg}${RESET}"
+            fi
         done < <(_get_group_packages "$gname")
     done < <(_get_groups)
     exit 0

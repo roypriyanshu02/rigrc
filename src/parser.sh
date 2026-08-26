@@ -823,6 +823,27 @@ _preload_all_manifests() {
         done
     fi
 
+    if [[ -n "${_CONF_PKG_KEYS["global:EXCLUDE_PACKAGES"]:-}" ]]; then
+        local raw_ep="${_CONF_PKG_KEYS["global:EXCLUDE_PACKAGES"]}"
+        raw_ep="${raw_ep//[()]/}"
+        raw_ep="${raw_ep//,/ }"
+        local ep
+        for ep in $raw_ep; do
+            [[ -n "$ep" ]] && _CONF_PKG_DISABLED["$ep"]=1
+        done
+    fi
+
+    if [[ -n "${_CONF_PKG_KEYS["global:INSTALL_PACKAGES"]:-${_CONF_PKG_KEYS["global:PACKAGES"]:-}}" ]]; then
+        local raw_ip="${_CONF_PKG_KEYS["global:INSTALL_PACKAGES"]:-${_CONF_PKG_KEYS["global:PACKAGES"]:-}}"
+        raw_ip="${raw_ip//[()]/}"
+        raw_ip="${raw_ip//,/ }"
+        local ip
+        OPTIONAL_PACKAGES=()
+        for ip in $raw_ip; do
+            [[ -n "$ip" ]] && OPTIONAL_PACKAGES+=("$ip")
+        done
+    fi
+
     _finalize_conf_caches "$pdir"
 }
 
