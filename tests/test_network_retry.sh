@@ -92,9 +92,6 @@ _test_143_cmd() {
 _run_retry 3 0 "test_143" _test_143_cmd || true
 assert_eq "1" "$(<"$retry_count_file")" "_run_retry does not retry on SIGTERM (exit code 143)"
 
-# Test _fetch_github_release_version validation
-assert_failure "_fetch_github_release_version fails on invalid repository" _fetch_github_release_version "nonexistent_org_xyz/nonexistent_repo_xyz_987"
-
 # Test _get_remediation_hint
 assert_contains "$(_get_remediation_hint "Could not get lock /var/lib/dpkg/lock")" "lock busy" "_get_remediation_hint provides lock hint"
 assert_contains "$(_get_remediation_hint "404 Not Found")" "Asset not found" "_get_remediation_hint provides 404 hint"

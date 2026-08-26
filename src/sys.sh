@@ -105,22 +105,12 @@ _get_detected_conds() {
     fi
 }
 
-_is_system_path() {
-    local path="$1"
-    [[ -z "$path" ]] && return 1
-    if [[ "$path" == "$HOME/"* || "$path" == "/home/"* ]]; then
-        return 1
-    fi
-    return 0
+_is_user_path() {
+    [[ -n "${1:-}" && ( "$1" == "$HOME/"* || "$1" == "/home/"* ) ]]
 }
 
-_is_user_path() {
-    local path="$1"
-    [[ -z "$path" ]] && return 1
-    if [[ "$path" == "$HOME/"* || "$path" == "/home/"* ]]; then
-        return 0
-    fi
-    return 1
+_is_system_path() {
+    [[ -n "${1:-}" ]] && ! _is_user_path "$1"
 }
 
 # Check if binary exists in scoped search paths
@@ -130,28 +120,31 @@ _check_bins_scoped() {
     local b _bins scope="${2:-any}"
     IFS=',' read -ra _bins <<< "$1"
     for b in "${_bins[@]}"; do
-        b="${b#"${b%%[![:space:]]*}"}"; b="${b%"${b##*[![:space:]]}"}"
+        b="$(_trim "$b")"
         [[ -z "$b" ]] && continue
 
         local -a candidates=()
+        local -A _seen=()
+        _add_cand() {
+            local c="$1"
+            if [[ -n "$c" && -z "${_seen["$c"]:-}" ]]; then
+                _seen["$c"]=1
+                candidates+=("$c")
+            fi
+        }
+
         if [[ "$b" == /* && ( -e "$b" || -r "$b" ) ]]; then
-            candidates+=("$b")
+            _add_cand "$b"
         fi
         local p
         while IFS= read -r p; do
-            [[ -n "$p" && -x "$p" ]] && candidates+=("$p")
+            [[ -n "$p" && -x "$p" ]] && _add_cand "$p"
         done < <(type -aP "$b" 2>/dev/null || true)
 
         if [[ "$scope" == "user" || "$scope" == "any" ]]; then
             local udir
             for udir in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.cargo/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims" "$HOME/.local/share/mise/shims" "$HOME/.bun/bin" "$HOME/go/bin" "$HOME/.atuin/bin" "$HOME/.gemini/antigravity-cli/bin" "$HOME/.opencode/bin" "$HOME/.codex/bin"; do
-                if [[ -x "$udir/$b" ]]; then
-                    local already_in=0 c
-                    for c in "${candidates[@]}"; do
-                        [[ "$c" == "$udir/$b" ]] && { already_in=1; break; }
-                    done
-                    [[ $already_in -eq 0 ]] && candidates+=("$udir/$b")
-                fi
+                [[ -x "$udir/$b" ]] && _add_cand "$udir/$b"
             done
 
             local mise_cmd=""
@@ -163,31 +156,19 @@ _check_bins_scoped() {
             if [[ -n "$mise_cmd" ]]; then
                 local mise_bin
                 mise_bin="$("$mise_cmd" which "$b" 2>/dev/null || true)"
-                if [[ -n "$mise_bin" && -x "$mise_bin" ]]; then
-                    local already_in=0 c
-                    for c in "${candidates[@]}"; do
-                        [[ "$c" == "$mise_bin" ]] && { already_in=1; break; }
-                    done
-                    [[ $already_in -eq 0 ]] && candidates+=("$mise_bin")
-                fi
+                [[ -n "$mise_bin" && -x "$mise_bin" ]] && _add_cand "$mise_bin"
             fi
 
             local s_root
             for s_root in "${SDKMAN_DIR:-}" "${XDG_DATA_HOME:-$HOME/.local/share}/sdkman" "$HOME/.sdkman"; do
                 [[ -z "$s_root" ]] && continue
                 if [[ ( "$b" == "sdk" || "$b" == "sdkman" ) && -s "$s_root/bin/sdkman-init.sh" ]]; then
-                    candidates+=("$s_root/bin/sdkman-init.sh")
+                    _add_cand "$s_root/bin/sdkman-init.sh"
                 fi
                 if [[ -d "$s_root/candidates" ]]; then
                     local s_cand
                     for s_cand in "$s_root/candidates"/*; do
-                        if [[ -x "$s_cand/current/bin/$b" ]]; then
-                            local already_in=0 c
-                            for c in "${candidates[@]}"; do
-                                [[ "$c" == "$s_cand/current/bin/$b" ]] && { already_in=1; break; }
-                            done
-                            [[ $already_in -eq 0 ]] && candidates+=("$s_cand/current/bin/$b")
-                        fi
+                        [[ -x "$s_cand/current/bin/$b" ]] && _add_cand "$s_cand/current/bin/$b"
                     done
                 fi
             done
@@ -196,13 +177,7 @@ _check_bins_scoped() {
         if [[ "$scope" == "system" || "$scope" == "any" ]]; then
             local sdir
             for sdir in "/usr/local/bin" "/usr/bin" "/bin" "/usr/sbin" "/sbin" "/opt/bin"; do
-                if [[ -x "$sdir/$b" ]]; then
-                    local already_in=0 c
-                    for c in "${candidates[@]}"; do
-                        [[ "$c" == "$sdir/$b" ]] && { already_in=1; break; }
-                    done
-                    [[ $already_in -eq 0 ]] && candidates+=("$sdir/$b")
-                fi
+                [[ -x "$sdir/$b" ]] && _add_cand "$sdir/$b"
             done
         fi
 
@@ -241,7 +216,7 @@ _check_bins_scoped() {
 }
 
 _check_bins() {
-    _check_bins_scoped "$1" "any"
+    _check_bins_scoped "$@"
 }
 
 # Quick non-blocking network probe

@@ -111,13 +111,24 @@ _lint_manifest() {
         done
     done
 
-    local cfg
+    local -a cfg_list=()
     for cfg in "$SCRIPT_DIR/"*.conf; do
-        [[ ! -f "$cfg" ]] && continue
+        [[ -f "$cfg" ]] && cfg_list+=("$cfg")
+    done
+    if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE:-}" ]]; then
+        local already_in=false
+        for c in "${cfg_list[@]}"; do
+            [[ "$c" == "$CONFIG_FILE" ]] && already_in=true && break
+        done
+        [[ "$already_in" == false ]] && cfg_list+=("$CONFIG_FILE")
+    fi
+
+    local cfg
+    for cfg in "${cfg_list[@]}"; do
         local fname
         fname="$(basename "$cfg")"
 
-        local raw_line line in_tmpl=false
+        local raw_line line in_tmpl=false cur_sec=""
         while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
             line="${raw_line#"${raw_line%%[![:space:]]*}"}"
             line="${line%"${line##*[![:space:]]}"}"
@@ -126,6 +137,7 @@ _lint_manifest() {
                 local sec_type="" sec_ident="" sec_mod="" is_valid=0
                 _parse_section_header "$header" sec_type sec_ident sec_mod is_valid
                 if [[ "$is_valid" -eq 0 ]]; then
+                    cur_sec="$sec_type"
                     if [[ "$sec_type" == "template" ]]; then
                         in_tmpl=true
                     else
@@ -135,26 +147,76 @@ _lint_manifest() {
                     log_error "Config $fname: Invalid section header or modifier syntax: '[$header]'"
                     errors=$((errors + 1))
                 fi
+            elif [[ "$cur_sec" == "config" && "$in_tmpl" == false && "$line" == *"="* ]]; then
+                local raw_k="${line%%=*}"
+                raw_k="${raw_k#"${raw_k%%[![:space:]]*}"}"; raw_k="${raw_k%"${raw_k##*[![:space:]]}"}"
+                local k_lower="${raw_k,,}"
+                case "$k_lower" in
+                    groups|packages|exclude|cond|disable_cond|git_user_name|git_email|git_default_branch)
+                        if [[ "$raw_k" != "$k_lower" ]]; then
+                            log_warn "Config $fname: '$raw_k' in [config] should be lowercase '$k_lower'."
+                        fi
+                        ;;
+                    install_groups)
+                        log_error "Config $fname: '$raw_k' is invalid in [config]. Use 'groups = ...' instead."
+                        errors=$((errors + 1))
+                        ;;
+                    install_packages)
+                        log_error "Config $fname: '$raw_k' is invalid in [config]. Use 'packages = ...' instead."
+                        errors=$((errors + 1))
+                        ;;
+                    exclude_packages)
+                        log_error "Config $fname: '$raw_k' is invalid in [config]. Use 'exclude = ...' instead."
+                        errors=$((errors + 1))
+                        ;;
+                    *)
+                        log_error "Config $fname: Unrecognized key '$raw_k' in [config]. Allowed: groups, packages, exclude, cond, disable_cond, git_user_name, git_email."
+                        errors=$((errors + 1))
+                        ;;
+                esac
             fi
         done < "$cfg"
     done
 
-    if [[ -n "${_CONF_PKG_KEYS["global:INSTALL_GROUPS"]:-}" ]]; then
-        local raw_ig="${_CONF_PKG_KEYS["global:INSTALL_GROUPS"]}"
-        raw_ig="${raw_ig//[()]/}"
-        raw_ig="${raw_ig//,/ }"
+    if [[ -n "${_CONF_PKG_KEYS["global:groups"]:-}" ]]; then
+        local raw_ig="${_CONF_PKG_KEYS["global:groups"]//[()]/}"
         local g
-        for g in $raw_ig; do
+        for g in ${raw_ig//,/ }; do
             [[ -z "$g" ]] && continue
-            local found=false vg
-            for vg in "${valid_groups[@]}"; do
-                if [[ "$g" == "$vg" ]]; then
-                    found=true
-                    break
-                fi
-            done
-            if [[ "$found" == false ]]; then
+            if [[ " ${valid_groups[*]} " != *" $g "* ]]; then
                 log_error "Configuration references unknown package group: '$g'"
+                errors=$((errors + 1))
+            fi
+        done
+    fi
+
+    # Validate packages list
+    local -a declared_pkgs=()
+    if [[ -n "${_CONF_PKG_KEYS["global:packages"]:-}" ]]; then
+        local raw_pkgs="${_CONF_PKG_KEYS["global:packages"]//[()]/}"
+        local p
+        for p in ${raw_pkgs//,/ }; do
+            [[ -z "$p" ]] && continue
+            declared_pkgs+=("$p")
+            if ! _find_pkg_manifest "$p" >/dev/null 2>&1; then
+                log_error "Configuration references unknown package in 'packages': '$p'"
+                errors=$((errors + 1))
+            fi
+        done
+    fi
+
+    # Validate exclude list and check conflicts
+    if [[ -n "${_CONF_PKG_KEYS["global:exclude"]:-}" ]]; then
+        local raw_ex="${_CONF_PKG_KEYS["global:exclude"]//[()]/}"
+        local ep
+        for ep in ${raw_ex//,/ }; do
+            [[ -z "$ep" ]] && continue
+            if ! _find_pkg_manifest "$ep" >/dev/null 2>&1; then
+                log_error "Configuration references unknown package in 'exclude': '$ep'"
+                errors=$((errors + 1))
+            fi
+            if [[ " ${declared_pkgs[*]:-} " == *" $ep "* ]]; then
+                log_error "Configuration conflict: Package '$ep' is listed in both 'packages' and 'exclude'."
                 errors=$((errors + 1))
             fi
         done
@@ -276,11 +338,9 @@ _doctor_check() {
 
     # 5. Broken Symlink Check
     printf "\n  %s[5/6]%s %s\n" "${CLR_MUTED}" "${RESET}" "${BOLD}Symlink Integrity${RESET}"
-    local broken_links=()
+    local broken_links=() link
     while IFS= read -r -d '' link; do
-        if [[ ! -e "$link" ]]; then
-            broken_links+=("$link")
-        fi
+        [[ ! -e "$link" ]] && broken_links+=("$link")
     done < <(find "$HOME" "$HOME/.config" -maxdepth 1 -type l -print0 2>/dev/null)
 
     if [[ ${#broken_links[@]} -eq 0 ]]; then
@@ -294,7 +354,7 @@ _doctor_check() {
         else
             log_warn "Found ${#broken_links[@]} broken symlink(s):"
             for link in "${broken_links[@]}"; do
-                printf "    %s %s\n" "${CLR_MUTED}•${RESET}" "$link"
+                printf "    %s %s\n" "${CLR_MUTED}${SYM_BULLET}${RESET}" "$link"
             done
             log_info "Run './rigrc.sh --doctor --fix' or './rigrc.sh --clean-symlinks' to remove them."
             warnings=$((warnings + 1))

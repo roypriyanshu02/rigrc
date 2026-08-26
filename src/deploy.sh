@@ -6,6 +6,14 @@
 # ---------------------------------------------------------------------------
 # Atomic File Writer & Backup Manager
 # ---------------------------------------------------------------------------
+_backup_file() {
+    local dest="$1" rel="$2"
+    _get_backup_dir
+    mkdir -p "$BACKUP_DIR/$(dirname "$rel")"
+    mv "$dest" "$BACKUP_DIR/$rel"
+    BACKUP_COUNT=$((BACKUP_COUNT + 1))
+}
+
 _write_file() {
     local target="$1" content="$2" flags="${3:-}"
     local dest="${target/#\~/$HOME}"
@@ -74,32 +82,7 @@ _write_file() {
                 if [[ "$DRY_RUN" == true ]]; then
                     log_action "Would back up existing file: ${target}"
                 else
-                    _get_backup_dir
-                    mkdir -p "$BACKUP_DIR/$(dirname "$rel")"
-                    
-                    local file_sha="" file_mode=""
-                    if command -v sha256sum >/dev/null 2>&1; then
-                        read -r file_sha _ < <(sha256sum "$dest" 2>/dev/null || true)
-                    fi
-                    if command -v stat >/dev/null 2>&1; then
-                        file_mode="$(stat -c '%a' "$dest" 2>/dev/null || echo "644")"
-                    fi
-
-                    mv "$dest" "$BACKUP_DIR/$rel"
-                    BACKUP_COUNT=$((BACKUP_COUNT + 1))
-
-                    # Append to backup manifest
-                    local manifest_file="$BACKUP_DIR/.backup_manifest.json"
-                    local entry_json
-                    entry_json="{\"rel\":\"${rel}\",\"dest\":\"${dest}\",\"sha256\":\"${file_sha}\",\"mode\":\"${file_mode}\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
-                    if [[ ! -f "$manifest_file" ]]; then
-                        printf '[\n  %s\n]\n' "$entry_json" > "$manifest_file"
-                    else
-                        # Insert before the last line
-                        sed -i '$d' "$manifest_file" 2>/dev/null || true
-                        printf ',\n  %s\n]\n' "$entry_json" >> "$manifest_file"
-                    fi
-
+                    _backup_file "$dest" "$rel"
                     log_action "Backed up existing file: ${target}"
                 fi
             elif [[ -L "$dest" ]]; then
@@ -183,15 +166,6 @@ _rollback_latest_backup() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Template deployment
-# ---------------------------------------------------------------------------
-_extract_templates() {
-    local file="$1"
-    _preload_manifest_file "$file"
-    printf '%s' "${_CONF_TEMPLATES["$file"]:-}"
-}
-
 deploy_package_templates() {
     local conf_file="$1"
     [[ ! -f "$conf_file" ]] && return 0
@@ -199,8 +173,7 @@ deploy_package_templates() {
     local SPINNER_INDENT="${SPINNER_INDENT:-    }"
     _preload_manifest_file "$conf_file"
 
-    local tmpl_all
-    tmpl_all="$(_extract_templates "$conf_file")"
+    local tmpl_all="${_CONF_TEMPLATES["$conf_file"]:-}"
     [[ -z "$tmpl_all" ]] && return 0
 
     local rest="$tmpl_all"
@@ -225,6 +198,35 @@ deploy_package_templates() {
             content="$template_content"
         fi
 
+        if [[ -n "$tmpl_target" && "${_CONF_TMPL_DIS["$tmpl_target"]:-0}" -eq 1 ]]; then
+            continue
+        fi
+
+        # Check if user config has an explicit override for this template target
+        if [[ -n "$tmpl_target" && -n "${_CONF_TMPL_BUF["$tmpl_target"]:-}" ]]; then
+            local raw_custom="${_CONF_TMPL_BUF["$tmpl_target"]}"
+            while [[ -n "$raw_custom" ]]; do
+                local cur_cblock=""
+                if [[ "$raw_custom" == *"__TMPL_SEP__"* ]]; then
+                    cur_cblock="${raw_custom%%__TMPL_SEP__*}"
+                    raw_custom="${raw_custom#*__TMPL_SEP__}"
+                else
+                    cur_cblock="$raw_custom"
+                    raw_custom=""
+                fi
+                [[ -z "$cur_cblock" ]] && continue
+                local cur_cfirst="${cur_cblock%%$'\n'*}"
+                if [[ "$cur_cfirst" =~ flags:.*override ]]; then
+                    if [[ "$cur_cfirst" =~ ^#[[:space:]]*target:[[:space:]]*([^[:space:]]+)([[:space:]]+flags:(.+))? ]]; then
+                        tmpl_target="${BASH_REMATCH[1]}"
+                        [[ -n "${BASH_REMATCH[3]:-}" ]] && tmpl_flags="${BASH_REMATCH[3]}"
+                        content="${cur_cblock#*$'\n'}"
+                    fi
+                    break
+                fi
+            done
+        fi
+
         local tmpl_cond=""
         if [[ "$tmpl_flags" =~ cond=([^[:space:]]+) || "$tmpl_flags" =~ cond:([^[:space:]]+) ]]; then
             tmpl_cond="${BASH_REMATCH[1]}"
@@ -239,6 +241,7 @@ deploy_package_templates() {
         local pkg_name="${conf_file##*/}"; pkg_name="${pkg_name%.conf}"
         local var_name="TEMPLATE_OVERRIDE_${pkg_name^^}"
         var_name="${var_name//-/_}"
+        var_name="${var_name//./_}"
         local override_content="${!var_name:-}"
         [[ -n "$override_content" ]] && content="$override_content"
 
@@ -265,26 +268,61 @@ deploy_package_templates() {
     done
 }
 
-deploy_templates() {
-    local pdir="${1:-$PACKAGES_DIR}"
-    [[ ! -d "$pdir" ]] && return 0
-    _preload_all_manifests "$pdir"
+# ---------------------------------------------------------------------------
+# Deploy Standalone & Global Templates from User Config
+# ---------------------------------------------------------------------------
+deploy_global_templates() {
+    local global_tmpls="${_CONF_TMPL_BUF["global"]:-}"
+    [[ -z "$global_tmpls" ]] && return 0
+    local rest="$global_tmpls"
+    while [[ -n "$rest" ]]; do
+        local template_content=""
+        if [[ "$rest" == *"__TMPL_SEP__"* ]]; then
+            template_content="${rest%%__TMPL_SEP__*}"
+            rest="${rest#*__TMPL_SEP__}"
+        else
+            template_content="$rest"
+            rest=""
+        fi
+        [[ -z "$template_content" ]] && continue
 
-    local group pkg
-    while IFS= read -r group; do
-        [[ -z "$group" ]] && continue
-        _group_selected "$group" || continue
+        local first_line tmpl_target="" tmpl_flags="" content=""
+        first_line="${template_content%%$'\n'*}"
+        if [[ "$first_line" =~ ^#[[:space:]]*target:[[:space:]]*([^[:space:]]+)([[:space:]]+flags:(.+))? ]]; then
+            tmpl_target="${BASH_REMATCH[1]}"
+            [[ -n "${BASH_REMATCH[3]:-}" ]] && tmpl_flags="${BASH_REMATCH[3]}"
+            content="${template_content#*$'\n'}"
+        else
+            content="$template_content"
+        fi
 
-        while IFS= read -r pkg; do
-            [[ -z "$pkg" ]] && continue
-            local conf_file="$pdir/$group/$pkg.conf"
-            [[ ! -f "$conf_file" ]] && continue
+        case "$tmpl_target" in
+            .profile|~/.profile|.bash_profile|~/.bash_profile|.bashrc|~/.bashrc|.inputrc|~/.inputrc)
+                continue ;;
+        esac
 
-            if _package_is_active "$conf_file"; then
-                deploy_package_templates "$conf_file"
+        if [[ -n "$tmpl_target" && "${_CONF_TMPL_DIS["$tmpl_target"]:-0}" -eq 1 ]]; then
+            continue
+        fi
+
+        local tmpl_cond=""
+        if [[ "$tmpl_flags" =~ cond=([^[:space:]]+) || "$tmpl_flags" =~ cond:([^[:space:]]+) ]]; then
+            tmpl_cond="${BASH_REMATCH[1]}"
+        fi
+        if [[ -n "$tmpl_cond" ]]; then
+            if ! _eval_cond "$tmpl_cond"; then
+                log_info "Skipping template (unmet condition $tmpl_cond): $tmpl_target"
+                continue
             fi
-        done < <(_get_group_packages "$group")
-    done < <(_get_groups)
+        fi
+
+        if [[ -n "$tmpl_target" ]]; then
+            local write_flags="append"
+            [[ "$tmpl_flags" == *"once"* ]] && write_flags="once"
+            [[ "$tmpl_flags" == *"override"* ]] && write_flags="override"
+            _write_file "$tmpl_target" "$content" "$write_flags"
+        fi
+    done
 }
 
 _ensure_stow_ignore() {
@@ -293,14 +331,9 @@ _ensure_stow_ignore() {
     if [[ ! -f "$ignore_file" ]]; then
         mkdir -p "$DOTFILES_DIR"
         cat << 'EOF' > "$ignore_file"
-^packages\.conf$
-^myconfig.*$
-^config$
-^setup\.sh$
-^script\.sh$
+^\.git.*$
 ^README.*$
 ^LICENSE.*$
-^\.git.*$
 EOF
     fi
 }
@@ -319,6 +352,13 @@ deploy_stow() {
         [[ "$rel" == ".git"* || "$rel" == ".stow-local-ignore" ]] && continue
         dest="$HOME/$rel"
         if [[ -e "$dest" || -L "$dest" ]]; then
+            # Merge dynamically added tools (e.g. from mise use -g) before backup and symlinking
+            if [[ "$rel" == ".config/mise/config.toml" && -f "$dest" && ! -L "$dest" && -f "$file" ]]; then
+                if grep -q "^\[tools\]" "$dest" && ! grep -q "^\[tools\]" "$file"; then
+                    awk '/^\[tools\]/{flag=1} flag{print}' "$dest" >> "$file"
+                fi
+            fi
+
             real_dest="$(readlink -f "$dest" 2>/dev/null || true)"
             real_stow="$(readlink -f "$file" 2>/dev/null || true)"
             if [[ -n "$real_stow" && "$real_dest" != "$real_stow" ]]; then
@@ -326,26 +366,7 @@ deploy_stow() {
                     if [[ "$DRY_RUN" == true ]]; then
                         log_action "Would back up existing file before stow: ${rel}"
                     else
-                        _get_backup_dir
-                        mkdir -p "$BACKUP_DIR/$(dirname "$rel")"
-                        local file_sha="" file_mode=""
-                        if command -v sha256sum >/dev/null 2>&1; then
-                            read -r file_sha _ < <(sha256sum "$dest" 2>/dev/null || true)
-                        fi
-                        if command -v stat >/dev/null 2>&1; then
-                            file_mode="$(stat -c '%a' "$dest" 2>/dev/null || echo "644")"
-                        fi
-                        mv "$dest" "$BACKUP_DIR/$rel"
-                        BACKUP_COUNT=$((BACKUP_COUNT + 1))
-                        local manifest_file="$BACKUP_DIR/.backup_manifest.json"
-                        local entry_json
-                        entry_json="{\"rel\":\"${rel}\",\"dest\":\"${dest}\",\"sha256\":\"${file_sha}\",\"mode\":\"${file_mode}\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
-                        if [[ ! -f "$manifest_file" ]]; then
-                            printf '[\n  %s\n]\n' "$entry_json" > "$manifest_file"
-                        else
-                            sed -i '$d' "$manifest_file" 2>/dev/null || true
-                            printf ',\n  %s\n]\n' "$entry_json" >> "$manifest_file"
-                        fi
+                        _backup_file "$dest" "$rel"
                         log_action "Backed up existing file before stow: ${rel}"
                     fi
                 elif [[ -L "$dest" ]]; then
@@ -364,7 +385,7 @@ deploy_stow() {
         if [[ -f "$DOTFILES_DIR/.stow-local-ignore" ]]; then
             local p
             while IFS= read -r p || [[ -n "$p" ]]; do
-                p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+                p="$(_trim "$p")"
                 [[ -z "$p" || "$p" == '#'* ]] && continue
                 ignore_patterns+=("$p")
             done < "$DOTFILES_DIR/.stow-local-ignore"
@@ -426,35 +447,28 @@ configure_git() {
         fi
     }
 
-    if [[ -n "$name" ]]; then
-        local cur_name
-        cur_name="$(git config --global user.name 2>/dev/null || true)"
-        if [[ "$name" != "$cur_name" ]]; then
-            _git_set user.name "$name"
-            if [[ "$DRY_RUN" != true ]]; then log_success "Set git user.name: ${name}"; fi
+    _git_set_if_changed() {
+        local key="$1" val="$2"
+        [[ -z "$val" ]] && return 0
+        local cur_val
+        cur_val="$(git config --global "$key" 2>/dev/null || true)"
+        if [[ "$val" != "$cur_val" ]]; then
+            _git_set "$key" "$val"
+            [[ "$DRY_RUN" != true ]] && log_success "Set git ${key}: ${val}"
         else
-            log_info "Git user.name already set: ${name}"
+            log_info "Git ${key} already set: ${val}"
         fi
-    fi
+    }
 
-    [[ -n "${GIT_DEFAULT_BRANCH:-}" ]] && _git_set init.defaultBranch "$GIT_DEFAULT_BRANCH"
-    [[ -n "${GIT_EDITOR:-}" ]] && _git_set core.editor "$GIT_EDITOR"
+    _git_set_if_changed "user.name" "$name"
+    _git_set_if_changed "user.email" "$email"
+    [[ -n "${GIT_DEFAULT_BRANCH:-}" ]] && _git_set "init.defaultBranch" "$GIT_DEFAULT_BRANCH"
+    [[ -n "${GIT_EDITOR:-}" ]] && _git_set "core.editor" "$GIT_EDITOR"
 
     if [[ -n "${GIT_SIGNING_KEY:-}" ]]; then
-        _git_set user.signingKey "$GIT_SIGNING_KEY"
-        _git_set commit.gpgSign true
-        if [[ "$DRY_RUN" != true ]]; then log_info "Git commit signing enabled: ${GIT_SIGNING_KEY}"; fi
-    fi
-
-    if [[ -n "$email" ]]; then
-        local cur_email
-        cur_email="$(git config --global user.email 2>/dev/null || true)"
-        if [[ "$email" != "$cur_email" ]]; then
-            _git_set user.email "$email"
-            if [[ "$DRY_RUN" != true ]]; then log_success "Set git user.email: ${email}"; fi
-        else
-            log_info "Git user.email already set: ${email}"
-        fi
+        _git_set "user.signingKey" "$GIT_SIGNING_KEY"
+        _git_set "commit.gpgSign" "true"
+        [[ "$DRY_RUN" != true ]] && log_info "Git commit signing enabled: ${GIT_SIGNING_KEY}"
     fi
 }
 

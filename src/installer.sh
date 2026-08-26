@@ -49,97 +49,52 @@ _wait_for_pm_lock() {
     local max_wait="${2:-30}"
     local waited=0
     [[ "$DRY_RUN" == true || -z "$pm" || "$pm" == "unknown" ]] && return 0
+
+    local lock_files=()
     case "$pm" in
         apt|apt-get)
-            local lock_files=(
+            lock_files=(
                 "/var/lib/dpkg/lock-frontend"
                 "/var/lib/dpkg/lock"
                 "/var/lib/apt/lists/lock"
                 "/var/cache/apt/archives/lock"
-            )
-            while [[ $waited -lt $max_wait ]]; do
-                local locked=false lf
-                for lf in "${lock_files[@]}"; do
-                    if _is_file_locked "$lf"; then
-                        locked=true
-                        break
-                    fi
-                done
-                if [[ "$locked" == false ]]; then
-                    return 0
-                fi
-                if [[ $waited -eq 0 ]]; then
-                    log_warn "Waiting for package manager lock to release (${pm})..."
-                fi
-                sleep 2
-                waited=$(( waited + 2 ))
-            done
-            log_warn "Package manager lock still held after ${max_wait}s. Proceeding anyway."
-            ;;
+            ) ;;
         pacman)
-            local db_lock="/var/lib/pacman/db.lck"
-            while [[ $waited -lt $max_wait && -f "$db_lock" ]]; do
-                if command -v pgrep >/dev/null 2>&1 && ! pgrep -x pacman >/dev/null 2>&1; then
-                    log_warn "Stale pacman lock file detected ($db_lock with no active pacman process). Proceeding."
-                    return 0
-                fi
-                if [[ $waited -eq 0 ]]; then
-                    log_warn "Waiting for pacman lock ($db_lock) to release..."
-                fi
-                sleep 2
-                waited=$(( waited + 2 ))
-            done
-            ;;
+            lock_files=("/var/lib/pacman/db.lck") ;;
         dnf)
-            local dnf_locks=("/var/run/dnf.pid" "/var/lib/dnf/lock")
-            while [[ $waited -lt $max_wait ]]; do
-                local d_locked=false dlf
-                for dlf in "${dnf_locks[@]}"; do
-                    if _is_file_locked "$dlf"; then
-                        d_locked=true; break
-                    fi
-                done
-                [[ "$d_locked" == false ]] && return 0
-                [[ $waited -eq 0 ]] && log_warn "Waiting for dnf lock to release..."
-                sleep 2
-                waited=$(( waited + 2 ))
-            done
-            ;;
+            lock_files=("/var/run/dnf.pid" "/var/lib/dnf/lock") ;;
         apk)
-            local apk_lock="/lib/apk/db/lock"
-            while [[ $waited -lt $max_wait && -f "$apk_lock" ]]; do
-                if _is_file_locked "$apk_lock"; then
-                    [[ $waited -eq 0 ]] && log_warn "Waiting for apk lock to release..."
-                    sleep 2
-                    waited=$(( waited + 2 ))
-                else
-                    break
-                fi
-            done
-            ;;
+            lock_files=("/lib/apk/db/lock") ;;
         zypper)
-            local zyp_lock="/var/run/zypp.pid"
-            while [[ $waited -lt $max_wait && -f "$zyp_lock" ]]; do
-                if _is_file_locked "$zyp_lock"; then
-                    [[ $waited -eq 0 ]] && log_warn "Waiting for zypper lock to release..."
-                    sleep 2
-                    waited=$(( waited + 2 ))
-                else
+            lock_files=("/var/run/zypp.pid") ;;
+        *) return 0 ;;
+    esac
+
+    while [[ $waited -lt $max_wait ]]; do
+        local locked=false lf
+        if [[ "$pm" == "pacman" && -f "/var/lib/pacman/db.lck" ]]; then
+            if command -v pgrep >/dev/null 2>&1 && ! pgrep -x pacman >/dev/null 2>&1; then
+                log_warn "Stale pacman lock file detected (/var/lib/pacman/db.lck with no active pacman process). Proceeding."
+                return 0
+            fi
+            locked=true
+        else
+            for lf in "${lock_files[@]}"; do
+                if _is_file_locked "$lf"; then
+                    locked=true
                     break
                 fi
             done
-            ;;
-    esac
-    return 0
-}
+        fi
 
-_run_pm() {
-    _wait_for_pm_lock "${_PM:-}"
-    if [[ "$VERBOSE" == true ]]; then
-        "$@"
-    else
-        _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "Package manager" "$@"
-    fi
+        [[ "$locked" == false ]] && return 0
+        [[ $waited -eq 0 ]] && log_warn "Waiting for package manager lock to release (${pm})..."
+        sleep 2
+        waited=$(( waited + 2 ))
+    done
+
+    log_warn "Package manager lock still held after ${max_wait}s. Proceeding anyway."
+    return 0
 }
 
 # Wrapper: eval a script-method install command with retry and timeout.
@@ -429,9 +384,7 @@ _install_single_package() {
             if [[ "$DRY_RUN" == true ]]; then
                 log_success "$pkg_id (${provider})"
             else
-                local pkg_timeout="$(_get_pkg_prop "$pkg_id" "$target_key" "" "timeout")"
-                [[ -z "$pkg_timeout" ]] && pkg_timeout="$(_get_pkg_prop "$cpkg" "$target_key" "" "timeout")"
-                [[ -z "$pkg_timeout" ]] && pkg_timeout="$(_get_opt timeout "$rest")"
+                local pkg_timeout="${_CONF_PKG_KEYS["${pkg_id}:timeout"]:-${_CONF_PKG_KEYS["${target_key}:timeout"]:-${_CONF_PKG_KEYS["${cpkg}:timeout"]:-$(_get_opt timeout "$rest")}}}"
                 if SPINNER_INDENT="  " _run_script "$scmd" "${pkg_id} (${provider})" "${pkg_timeout:-$INSTALL_TIMEOUT}"; then
                     install_success=true
                 else
@@ -440,23 +393,18 @@ _install_single_package() {
             fi
         fi
 
+        local post_cmd="${_CONF_PKG_KEYS["${target_key}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${pkg_id}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${cpkg}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${target_key}:post"]:-${_CONF_PKG_KEYS["${pkg_id}:post"]:-${_CONF_PKG_KEYS["${cpkg}:post"]:-}}}}}}"
+        [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt "${pm_key}.post" "$rest")"
+        [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt post "$rest")"
+
         local proceed_post=true
         if [[ "$install_success" == false ]]; then
             _FAILED_PACKAGES+=("$pkg_id")
             _FAILURE_REASONS["$pkg_id"]="${_LAST_CMD_ERROR:-Installation failed}"
             _CONF_PKG_DECLINED["$pkg_id"]=1
 
-            local has_post_actions=false
-            local post_cmd="${_CONF_PKG_KEYS["${target_key}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${pkg_id}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${cpkg}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${target_key}:post"]:-${_CONF_PKG_KEYS["${pkg_id}:post"]:-${_CONF_PKG_KEYS["${cpkg}:post"]:-}}}}}}"
-            [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt "${pm_key}.post" "$rest")"
-            [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt post "$rest")"
-            local tmpl_check
-            tmpl_check="$(_extract_templates "$conf_file")"
+            local tmpl_check="${_CONF_TEMPLATES["$conf_file"]:-}"
             if [[ -n "$post_cmd" || -n "$tmpl_check" ]]; then
-                has_post_actions=true
-            fi
-
-            if [[ "$has_post_actions" == true ]]; then
                 if [[ "$DRY_RUN" == true ]]; then
                     proceed_post=true
                 elif [[ "${NON_INTERACTIVE:-false}" == true ]]; then
@@ -478,9 +426,6 @@ _install_single_package() {
 
         if [[ "$proceed_post" == true ]]; then
             # Run post hook if present (before verification so symlinks/wrappers exist)
-            local post_cmd="${_CONF_PKG_KEYS["${target_key}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${pkg_id}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${cpkg}:${pm_key}.post"]:-${_CONF_PKG_KEYS["${target_key}:post"]:-${_CONF_PKG_KEYS["${pkg_id}:post"]:-${_CONF_PKG_KEYS["${cpkg}:post"]:-}}}}}}"
-            [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt "${pm_key}.post" "$rest")"
-            [[ -z "$post_cmd" ]] && post_cmd="$(_get_opt post "$rest")"
             if [[ -n "$post_cmd" ]]; then
                 if [[ "$DRY_RUN" == true ]]; then
                     [[ "$VERBOSE" == true ]] && log_action "    post: $post_cmd"
@@ -542,14 +487,9 @@ install_packages() {
         if [[ "$is_opt" == "false" || "$g" == "core" ]]; then
             grp_locks+=("required")
             grp_states+=(1)
-        elif [[ ${#INSTALL_GROUPS[@]} -gt 0 ]]; then
-            if _group_selected "$g"; then
-                grp_locks+=("optional")
-                grp_states+=(1)
-            else
-                grp_locks+=("optional")
-                grp_states+=(0)
-            fi
+        elif _group_selected "$g"; then
+            grp_locks+=("config")
+            grp_states+=(1)
         else
             grp_locks+=("optional")
             grp_states+=(0)
@@ -633,7 +573,10 @@ install_packages() {
                 IFS="$saved_ifs"
             fi
 
-            if [[ "$(_get_opt disabled "$rest")" == true || "${_CONF_PKG_DISABLED["$pkg"]:-0}" -eq 1 ]]; then
+            if [[ "${_CONF_PKG_DISABLED["$pkg"]:-0}" -eq 1 ]]; then
+                pkg_locks+=("disabled:config")
+                pkg_states+=(0)
+            elif [[ "$(_get_opt disabled "$rest")" == true ]]; then
                 pkg_locks+=("disabled")
                 pkg_states+=(0)
             elif ! _eval_cond "" "$rest"; then
@@ -661,7 +604,18 @@ install_packages() {
                 local is_opt="$(_get_opt optional "$rest")"
                 local is_rec="$(_get_opt recommended "$rest")"
 
-                if [[ "$is_opt" != true && -z "$alt_target" ]]; then
+                local is_opt_explicit=0
+                if [[ ${#OPTIONAL_PACKAGES[@]} -gt 0 ]]; then
+                    local op
+                    for op in "${OPTIONAL_PACKAGES[@]}"; do
+                        [[ "$op" == "$pkg" || "$op" == "$pkg_id" ]] && is_opt_explicit=1 && break
+                    done
+                fi
+
+                if [[ "$is_opt_explicit" -eq 1 ]]; then
+                    pkg_locks+=("config")
+                    pkg_states+=(1)
+                elif [[ "$is_opt" != true && -z "$alt_target" ]]; then
                     pkg_locks+=("required")
                     pkg_states+=(1)
                 elif [[ -n "$alt_target" ]]; then
@@ -678,11 +632,7 @@ install_packages() {
                 else
                     pkg_locks+=("optional")
                     if [[ ${#OPTIONAL_PACKAGES[@]} -gt 0 ]]; then
-                        local opt_match=0 op
-                        for op in "${OPTIONAL_PACKAGES[@]}"; do
-                            [[ "$op" == "$pkg" || "$op" == "$pkg_id" ]] && opt_match=1 && break
-                        done
-                        pkg_states+=($opt_match)
+                        pkg_states+=(0)
                     else
                         pkg_states+=(1)
                     fi

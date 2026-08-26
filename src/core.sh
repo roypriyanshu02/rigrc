@@ -16,14 +16,15 @@ if [[ -z "${SCRIPT_DIR:-}" ]]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [[ "$SCRIPT_DIR" == */src/* || "$SCRIPT_DIR" == */src ]]; then
         SCRIPT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-        [[ "$SCRIPT_DIR" == */src ]] && SCRIPT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     fi
 fi
 RIGRC_VERSION="${RIGRC_VERSION:-}"
 if [[ -z "$RIGRC_VERSION" ]]; then
     if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        RIGRC_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
-        RIGRC_VERSION="${RIGRC_VERSION#v}"
+        RIGRC_VERSION="$(git rev-parse --short HEAD 2>/dev/null || echo "dev")"
+        if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+            RIGRC_VERSION="${RIGRC_VERSION}-dirty"
+        fi
     else
         RIGRC_VERSION="dev"
     fi
@@ -53,15 +54,12 @@ OFFLINE="${OFFLINE:-false}"
 INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-300}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-2}"
-NETWORK_TIMEOUT="${NETWORK_TIMEOUT:-15}"
 BACKUP_COUNT=0
 SUDO_PID=""
 
 # Failure and warning registries
-declare -a _FAILED_PACKAGES=()
-declare -A _FAILURE_REASONS=()
-declare -a _WARNING_MESSAGES=()
-declare -A _DEP_RESOLVE_STACK=()
+declare -a _FAILED_PACKAGES=() _WARNING_MESSAGES=()
+declare -A _FAILURE_REASONS=() _DEP_RESOLVE_STACK=()
 _LAST_CMD_ERROR=""
 
 # System detection and lookup caches
@@ -96,29 +94,15 @@ declare -i _INSTALLED_PACKAGES_COUNT=0
 # In-memory package & group manifest cache
 declare -a _GROUPS_LIST=()
 declare -A _GROUP_DESCS=() _GROUP_PACKAGES_MAP=() _GROUP_OPTIONAL=()
-declare -i _GROUPS_LOADED=0
+declare -i _GROUPS_LOADED=0 _CONF_CASCADE_DONE=0
 
-declare -A _CONF_PARSED=()
-declare -A _CONF_PKG_NAME=()
-declare -A _CONF_PKG_BIN=()
-declare -A _CONF_PKG_DESC=()
-declare -A _CONF_PKG_SCOPE=()
-declare -A _CONF_PKG_INSTALL=()
-declare -A _CONF_PKG_OPTS=()
-declare -A _CONF_BASHRC=()
-declare -A _CONF_TEMPLATES=()
+declare -A _CONF_PARSED=() _CONF_PKG_NAME=() _CONF_PKG_BIN=() _CONF_PKG_DESC=() \
+           _CONF_PKG_SCOPE=() _CONF_PKG_INSTALL=() _CONF_PKG_OPTS=() _CONF_BASHRC=() _CONF_TEMPLATES=()
 
-declare -A _CONF_PKG_KEYS=()
-declare -A _CONF_PKG_DISABLED=()
-declare -A _CONF_PKG_DECLINED=()
-declare -A _CONF_BASHRC_BUF=()
-declare -A _CONF_BASHRC_DIS=()
-declare -A _CONF_TMPL_BUF=()
-declare -A _CONF_TMPL_DIS=()
+declare -A _CONF_PKG_KEYS=() _CONF_PKG_DISABLED=() _CONF_PKG_DECLINED=() \
+           _CONF_BASHRC_BUF=() _CONF_BASHRC_DIS=() _CONF_TMPL_BUF=() _CONF_TMPL_DIS=()
 
-declare -i _CONF_CASCADE_DONE=0
-declare -a _TRACKED_TMP_FILES=()
-declare -a _TRACKED_CHILD_PIDS=()
+declare -a _TRACKED_TMP_FILES=() _TRACKED_CHILD_PIDS=()
 
 # ---------------------------------------------------------------------------
 # Cleanup & signal traps
@@ -128,13 +112,10 @@ _cleanup() {
     [[ -t 2 ]] && printf '\033[?25h\033]0;\007' >&2 || true
     [[ -n "$SUDO_PID" ]] && kill "$SUDO_PID" 2>/dev/null || true
 
-    # Clean tracked background children
+    # Clean tracked background children in batch
     if [[ ${#_TRACKED_CHILD_PIDS[@]} -gt 0 ]]; then
-        local cpid
-        for cpid in "${_TRACKED_CHILD_PIDS[@]}"; do
-            kill -TERM "$cpid" 2>/dev/null || true
-            kill -KILL "$cpid" 2>/dev/null || true
-        done
+        kill -TERM "${_TRACKED_CHILD_PIDS[@]}" 2>/dev/null || true
+        kill -KILL "${_TRACKED_CHILD_PIDS[@]}" 2>/dev/null || true
         _TRACKED_CHILD_PIDS=()
     fi
 
@@ -147,10 +128,7 @@ _cleanup() {
         rm -rf "$_BUNDLE_WORKDIR"
     fi
     if [[ ${#_TRACKED_TMP_FILES[@]} -gt 0 ]]; then
-        local tf
-        for tf in "${_TRACKED_TMP_FILES[@]}"; do
-            [[ -f "$tf" ]] && rm -f "$tf"
-        done
+        rm -f "${_TRACKED_TMP_FILES[@]}" 2>/dev/null || true
         _TRACKED_TMP_FILES=()
     fi
     [[ "$code" -ne 0 ]] && log_error "Setup interrupted with exit code $code." || true
@@ -177,29 +155,11 @@ _acquire_sudo() {
     fi
     [[ -n "${SUDO_PID:-}" ]] && kill "$SUDO_PID" 2>/dev/null || true
 
-    if sudo -n true 2>/dev/null; then
-        (while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 "$$" 2>/dev/null || exit; done) &
-        SUDO_PID=$!
-        return 0
+    if ! sudo -n true 2>/dev/null; then
+        log_info "Requesting sudo access for ${target_pm}."
+        sudo -v || { log_error "Sudo authentication failed."; exit 1; }
     fi
 
-    log_info "Requesting sudo access for ${target_pm}."
-    if [[ -t 0 || -t 1 || -c /dev/tty ]] && [[ "${NON_INTERACTIVE:-false}" == false ]]; then
-        local pass
-        pass="$(_ui_password "[sudo] password for ${USER:-root}")"
-        if [[ -n "$pass" ]]; then
-            if printf '%s\n' "$pass" | sudo -S -v 2>/dev/null; then
-                unset pass
-                (while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 "$$" 2>/dev/null || exit; done) &
-                SUDO_PID=$!
-                return 0
-            fi
-            unset pass
-            log_warn "Sudo pipe authentication failed. Falling back to interactive prompt..."
-        fi
-    fi
-
-    sudo -v || { log_error "Sudo authentication failed."; exit 1; }
     (while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 "$$" 2>/dev/null || exit; done) &
     SUDO_PID=$!
 }
@@ -264,52 +224,6 @@ _run_retry() {
         attempt=$(( attempt + 1 ))
     done
     return $rc
-}
-
-_curl_cmd() {
-    local -a args=(curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout "${NETWORK_TIMEOUT:-15}" --max-time "${INSTALL_TIMEOUT:-120}")
-    local has_gh=false arg
-    for arg in "$@"; do
-        if [[ "$arg" == *"github.com"* || "$arg" == *"api.github.com"* ]]; then
-            has_gh=true
-            break
-        fi
-    done
-    if [[ "$has_gh" == true ]]; then
-        local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-        if [[ -n "$token" ]]; then
-            args+=(-H "Authorization: Bearer $token")
-        fi
-    fi
-    "${args[@]}" "$@"
-}
-
-_fetch_github_release_version() {
-    local repo="$1"
-    local version=""
-    local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-    local -a auth_hdr=()
-    [[ -n "$token" ]] && auth_hdr=(-H "Authorization: Bearer $token")
-
-    local api_url="https://api.github.com/repos/${repo}/releases/latest"
-    local json_out=""
-    json_out="$(curl --proto '=https' --tlsv1.2 -sSL --connect-timeout 5 --max-time 15 "${auth_hdr[@]}" -H "Accept: application/vnd.github+json" "$api_url" 2>/dev/null || true)"
-    if [[ -n "$json_out" && "$json_out" =~ \"tag_name\":[[:space:]]*\"([^\"]+)\" ]]; then
-        version="${BASH_REMATCH[1]}"
-    fi
-
-    if [[ -z "$version" || "$version" == "null" ]]; then
-        local red_url
-        red_url="$(curl --proto '=https' --tlsv1.2 -sSL -o /dev/null -w '%{url_effective}' --connect-timeout 5 --max-time 15 "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
-        if [[ -n "$red_url" && "$red_url" == *"/releases/tag/"* ]]; then
-            version="${red_url##*/}"
-        fi
-    fi
-
-    if [[ -z "$version" || "$version" == "latest" ]]; then
-        return 1
-    fi
-    printf '%s' "$version"
 }
 
 # ---------------------------------------------------------------------------

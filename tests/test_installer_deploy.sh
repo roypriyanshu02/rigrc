@@ -47,8 +47,6 @@ assert_success "_write_file creates target in dotfiles dir when backing up" test
 assert_eq 1 "$BACKUP_COUNT" "_write_file increments BACKUP_COUNT on file backup"
 assert_success "_write_file creates backup in BACKUP_DIR" test -f "${BACKUP_DIR}/test_backup.txt"
 assert_eq "pre-existing home file content" "$(cat "${BACKUP_DIR}/test_backup.txt")" "_write_file preserves backed up home content"
-assert_success "_write_file creates .backup_manifest.json" test -f "${BACKUP_DIR}/.backup_manifest.json"
-assert_success "_backup_manifest contains valid rel entry" grep -q '"rel":"test_backup.txt"' "${BACKUP_DIR}/.backup_manifest.json"
 
 # Test _get_backup_dir produces no stdout pollution
 reset_test_state
@@ -114,6 +112,33 @@ assert_success "template buffer uses __TMPL_SEP__ delimiter" test "${buf_val#*__
 assert_success "template buffer does not contain NUL byte" test "${buf_val#*$'\0'}" = "$buf_val"
 assert_success "template buffer contains target path" test "${buf_val#*# target: ~/.config/test1.conf}" != "$buf_val"
 assert_success "template buffer contains cond flag" test "${buf_val#*cond=wsl}" != "$buf_val"
+
+# Test template override resolution in deploy_package_templates
+reset_test_state
+_CONF_CASCADE_DONE=1
+tmp_pkg_conf="$(mktemp)"
+cat << 'EOF' > "$tmp_pkg_conf"
+[package]
+name = mytool
+[template:~/.config/mytool.toml:once]
+default_setting = true
+EOF
+
+tmp_user_conf="$(mktemp)"
+cat << 'EOF' > "$tmp_user_conf"
+[template:~/.config/mytool.toml:override]
+custom_setting = 42
+EOF
+
+_parse_single_conf_file "$tmp_pkg_conf" "mytool"
+_parse_single_conf_file "$tmp_user_conf" "global"
+_CONF_TEMPLATES["$tmp_pkg_conf"]="${_CONF_TMPL_BUF["mytool"]:-}"
+
+deploy_package_templates "$tmp_pkg_conf"
+rm -f "$tmp_pkg_conf" "$tmp_user_conf"
+
+assert_success "overridden template file created" test -f "$DOTFILES_DIR/.config/mytool.toml"
+assert_contains "$(cat "$DOTFILES_DIR/.config/mytool.toml")" "custom_setting = 42" "overridden template content deployed"
 
 # Test _CONF_PKG_DECLINED and needs resolution in _package_is_active
 reset_test_state
