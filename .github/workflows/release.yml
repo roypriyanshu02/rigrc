@@ -1,10 +1,13 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git branch or commit SHA to release (default: main)'
+        required: false
+        default: 'main'
+        type: string
 
 permissions:
   contents: read
@@ -16,20 +19,68 @@ jobs:
   release:
     name: Build & Publish Release
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
+      actions: read
+      checks: read
       id-token: write
       attestations: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.event.inputs.ref || 'main' }}
           fetch-depth: 0
+
+      - name: Resolve Commit Hash
+        id: meta
+        run: |
+          FULL_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Target commit: ${FULL_SHA} (${SHORT_SHA})"
+
+      - name: Verify Test Status or Run Test Suite
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          full_sha="${{ steps.meta.outputs.full_sha }}"
+          short_sha="${{ steps.meta.outputs.short_sha }}"
+
+          echo "Checking test status for commit: ${full_sha} (${short_sha})..."
+
+          # Query GitHub Actions test.yml runs for this commit
+          RUNS_JSON="$(gh run list --workflow test.yml --commit "${full_sha}" --json status,conclusion,databaseId,url 2>/dev/null || echo "[]")"
+
+          run_conclusion="$(echo "$RUNS_JSON" | jq -r '.[0].conclusion // empty')"
+          run_status="$(echo "$RUNS_JSON" | jq -r '.[0].status // empty')"
+          run_url="$(echo "$RUNS_JSON" | jq -r '.[0].url // empty')"
+
+          if [[ "$run_conclusion" == "success" ]]; then
+            echo "✅ Tests passed for commit ${short_sha} (${run_url}). Continuing release."
+          elif [[ "$run_conclusion" == "failure" || "$run_conclusion" == "cancelled" || "$run_conclusion" == "timed_out" ]]; then
+            echo "❌ Tests failed for commit ${short_sha} (conclusion: ${run_conclusion}, ${run_url}). Aborting release." >&2
+            exit 1
+          else
+            echo "ℹ️ No completed test run found for commit ${short_sha} (status: ${run_status:-none}). Running test suite now..."
+            which shellcheck >/dev/null 2>&1 || (which sudo >/dev/null 2>&1 && sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq shellcheck 2>/dev/null || (DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq shellcheck 2>/dev/null || true))
+            shellcheck --version || true
+            shellcheck --severity=error -s bash src/*.sh build.sh test.sh tests/*.sh
+
+            VERSION="${short_sha}" ./build.sh
+            test -f rigrc.sh && test -x rigrc.sh
+            ./rigrc.sh --fmt --check-only
+            ./rigrc.sh --lint
+            ./test.sh
+            echo "✅ Test suite passed cleanly."
+          fi
 
       - name: Compile standalone release bundle
         run: |
-          ./build.sh
+          short_sha="${{ steps.meta.outputs.short_sha }}"
+          VERSION="${short_sha}" ./build.sh
           test -f rigrc.sh
           test -x rigrc.sh
 
@@ -39,29 +90,26 @@ jobs:
           sha256sum rigrc.sh > rigrc.sh.sha256
           sha_val="$(awk '{print $1}' rigrc.sh.sha256)"
           bundle_size="$(ls -lh rigrc.sh | awk '{print $5}')"
-          tag_name="${{ github.event.workflow_run.head_branch || github.ref_name }}"
-          if [[ -z "$tag_name" || "$tag_name" == "main" ]]; then
-            tag_name="$(git describe --tags --exact-match 2>/dev/null || echo "$tag_name")"
-          fi
-          echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
+          short_sha="${{ steps.meta.outputs.short_sha }}"
+          full_sha="${{ steps.meta.outputs.full_sha }}"
 
           cat << NOTES > RELEASE_NOTES.md
-          ## 📦 Standalone Release Bundle
+          ## 📦 Standalone Release Bundle (\`${short_sha}\`)
 
-          | Asset | SHA-256 Checksum | Size |
-          | :--- | :--- | :--- |
-          | \`rigrc.sh\` | \`${sha_val}\` | \`${bundle_size}\` |
+          | Asset | SHA-256 Checksum | Size | Target Commit |
+          | :--- | :--- | :--- | :--- |
+          | \`rigrc.sh\` | \`${sha_val}\` | \`${bundle_size}\` | \`${full_sha}\` |
 
           ### Quick Start
 
           \`\`\`bash
-          bash -c "\$(curl -fsSL https://github.com/${{ github.repository }}/releases/download/${tag_name}/rigrc.sh)"
+          bash -c "\$(curl -fsSL https://github.com/${{ github.repository }}/releases/download/${short_sha}/rigrc.sh)"
           \`\`\`
 
           ### Direct Download
 
           \`\`\`bash
-          curl -fsSL https://github.com/${{ github.repository }}/releases/download/${tag_name}/rigrc.sh -o rigrc.sh
+          curl -fsSL https://github.com/${{ github.repository }}/releases/download/${short_sha}/rigrc.sh -o rigrc.sh
           chmod +x rigrc.sh
           ./rigrc.sh
           \`\`\`
@@ -69,17 +117,20 @@ jobs:
 
           cat << SUMMARY >> "$GITHUB_STEP_SUMMARY"
           ## 🚀 GitHub Release Published
-          - **Tag**: \`${tag_name}\`
+          - **Release / Tag**: \`${short_sha}\`
+          - **Commit**: \`${full_sha}\`
           - **Bundle Size**: \`${bundle_size}\`
           - **SHA256**: \`${sha_val}\`
-          - **Asset**: [\`rigrc.sh\`](https://github.com/${{ github.repository }}/releases/download/${tag_name}/rigrc.sh)
+          - **Asset**: [\`rigrc.sh\`](https://github.com/${{ github.repository }}/releases/download/${short_sha}/rigrc.sh)
           SUMMARY
 
       - name: Publish GitHub Release
         run: |
-          tag_name="${{ steps.notes.outputs.tag_name }}"
-          gh release create "${tag_name}" \
-            --title "${tag_name}" \
+          short_sha="${{ steps.meta.outputs.short_sha }}"
+          full_sha="${{ steps.meta.outputs.full_sha }}"
+          gh release create "${short_sha}" \
+            --target "${full_sha}" \
+            --title "${short_sha}" \
             --notes-file RELEASE_NOTES.md \
             --generate-notes \
             rigrc.sh rigrc.sh.sha256
@@ -87,6 +138,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Attest Build Provenance
+        if: "!env.ACT"
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-path: 'rigrc.sh'

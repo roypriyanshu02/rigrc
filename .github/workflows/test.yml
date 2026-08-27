@@ -3,7 +3,6 @@ name: Test
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
     paths-ignore:
       - 'docs/**'
       - '**.md'
@@ -41,12 +40,13 @@ jobs:
 
       - name: Validate Workflow Syntax & YAML
         run: |
+          which python3 >/dev/null 2>&1 || (which sudo >/dev/null 2>&1 && sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-yaml 2>/dev/null || (DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-yaml 2>/dev/null || true))
           python3 -m pip install --quiet --break-system-packages pyyaml 2>/dev/null || python3 -m pip install --quiet pyyaml 2>/dev/null || true
           python3 -c "import yaml, glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/**/*.yml', recursive=True)]; print('All GitHub workflows and configs valid YAML.')"
 
       - name: Run ShellCheck
         run: |
-          which shellcheck >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck 2>/dev/null || true)
+          which shellcheck >/dev/null 2>&1 || (which sudo >/dev/null 2>&1 && sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq shellcheck 2>/dev/null || (DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq shellcheck 2>/dev/null || true))
           shellcheck --version
           shellcheck --severity=error -s bash src/*.sh build.sh test.sh tests/*.sh
 

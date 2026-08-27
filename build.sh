@@ -19,18 +19,20 @@ MODULES=(
     "$SCRIPT_DIR/src/main.sh"
 )
 
-# Resolve build version (environment override > git tag/describe > dev)
+# Resolve build version (environment override > git short hash > dev)
 BUILD_VERSION="${VERSION:-${RIGRC_VERSION:-}}"
 if [[ -z "$BUILD_VERSION" ]]; then
     if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        BUILD_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
+        BUILD_VERSION="$(git rev-parse --short HEAD 2>/dev/null || echo "dev")"
+        if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+            BUILD_VERSION="${BUILD_VERSION}-dirty"
+        fi
     else
         BUILD_VERSION="dev"
     fi
 fi
-BUILD_VERSION="${BUILD_VERSION#v}"
 
-echo "Building standalone script: $OUTPUT_FILE (v${BUILD_VERSION})"
+echo "Building standalone script: $OUTPUT_FILE (${BUILD_VERSION})"
 echo "Bundling ${#MODULES[@]} source modules..."
 
 # 2. Prepare compressed asset payload with checksum
