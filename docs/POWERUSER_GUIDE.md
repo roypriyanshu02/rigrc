@@ -1,6 +1,6 @@
 # Power User Guide
 
-This guide walks through creating your personal dotfiles repository, managing machine environments, automating updates from upstream, and provisioning new systems.
+A walkthrough for creating a personal dotfiles repository with `rigrc`, configuring environment profiles, automating upstream sync, and provisioning machines.
 
 ---
 
@@ -8,8 +8,8 @@ This guide walks through creating your personal dotfiles repository, managing ma
 
 `rigrc` separates your personal environment settings from cross-distro package definitions:
 
-- **Upstream Engine & Package Manifests**: Maintained in `rigrc` with multi-distro definitions (`apt`, `dnf`, `pacman`, `brew`, `mise`, `cmd`), pre/post hooks, and default configuration templates.
-- **Your Personal Repository**: Contains only `rigrc.sh` (the self-extracting distribution bundle) and your personal configuration files (`*.conf`).
+- **Upstream Engine & Package Manifests**: Maintained in `rigrc` with multi-distro definitions (`apt`, `dnf`, `pacman`, `brew`, `mise`, `cmd`), hooks, and default configuration templates.
+- **Your Personal Repository**: Contains only `rigrc.sh` (the standalone distribution bundle) and your personal configuration files (`*.conf`).
 
 ```mermaid
 flowchart LR
@@ -54,10 +54,10 @@ chmod +x rigrc.sh
 
 Review the default upstream configuration before writing your own:
 
-- **[src/base.conf](file:///home/roypr/Pro/mydotfiles/src/base.conf)**: Baseline environment variables, shell settings, and core dotfile templates.
-- **[packages/](file:///home/roypr/Pro/mydotfiles/packages)**: Package manifests organized by group (`shell/`, `dev-tools/`, etc.). Each manifest defines package manager targets, bundled dotfile templates (`[template:...]`), shell hooks (`[bashrc]`), and environment filters (`cond`).
+- **`src/base.conf`**: Default environment variables, shell settings, and core dotfile templates.
+- **`packages/`**: Package manifests organized by group (`shell/`, `dev-tools/`, etc.). Manifests define package manager targets, bundled dotfile templates (`[template:...]`), shell hooks (`[bashrc]`), and environment filters (`cond`).
 
-Use these files as a reference to determine what to inherit, override (`:override`), append (`:append`), or suppress (`:disable`) in your custom configuration file:
+Use these defaults as reference when configuring your overrides (`:override`), additions (`:append`), or exclusions (`:disable`):
 
 ```ini
 # custom.conf: Personal machine environment
@@ -65,16 +65,20 @@ Use these files as a reference to determine what to inherit, override (`:overrid
 [config]
 # Select package groups to install (from packages/_groups.conf)
 # Available: core, package-managers, shell, runtimes, sys-info, security-and-net, dev-tools, utilities, ai-agents
-INSTALL_GROUPS = core, shell, dev-tools, runtimes
+groups = core, shell, dev-tools, runtimes
+
+# Explicit packages to include or exclude
+# packages = starship, fzf, bat, zstd
+# exclude = docker, podman
 
 # Condition overrides (force enable or disable specific features)
-# COND = wsl
-# DISABLE_COND = container
+# cond = wsl
+# disable_cond = container
 
 # ── Git Identity & Package Overrides ──────────────────────────────────────────
-[package:gitconfig]
-GIT_USER_NAME = Your Name
-GIT_EMAIL = you@example.com
+[package:git]
+git_user_name = Your Name
+git_email = you@example.com
 
 # ── Custom Shell Environment & Aliases ────────────────────────────────────────
 [bashrc:append]
@@ -101,7 +105,7 @@ alias ll="eza -la"
 # [template:starship.toml:disable]
 ```
 
-> For full syntax details, condition tags (`wsl`, `container`), and section modifiers (`:append`, `:override`, `:disable`), see the **[Configuration & Manifest Syntax Reference](MANIFEST_SYNTAX.md)**.
+> For syntax details, condition tags (`wsl`, `container`), and section modifiers (`:append`, `:override`, `:disable`), see the **[Configuration & Manifest Syntax Reference](MANIFEST_SYNTAX.md)**.
 
 ### Step 4: Validate Your Configuration
 
@@ -123,11 +127,9 @@ git push -u origin main
 
 ---
 
-## 3. Automating Upstream Updates via GitHub Actions
+## 3. Automating Upstream Sync with GitHub Actions
 
-To keep your `rigrc.sh` bundle up-to-date with upstream bug fixes, package additions, and distro adjustments without manual downloading:
-
-Create `.github/workflows/sync.yml` in your personal repo:
+To keep your `rigrc.sh` bundle up to date automatically, add `.github/workflows/sync.yml` to your dotfiles repository:
 
 ```yaml
 name: Sync Upstream
@@ -180,11 +182,11 @@ cd ~/.dotfiles-repo
 
 ---
 
-## 5. Maintenance & Disaster Recovery
+## 5. Maintenance & Rollbacks
 
-### Environment Diagnostics & Fixes
+### Environment Diagnostics
 
-Audit PATH variables, broken symlinks, missing compilers, and required dependencies:
+Check PATH entries, broken symlinks, compilers, and required dependencies:
 
 ```bash
 ./rigrc.sh --doctor --fix
@@ -198,9 +200,9 @@ Prune orphaned symlinks in `$HOME` pointing to nonexistent targets:
 ./rigrc.sh --clean-symlinks
 ```
 
-### Rollback Previous State
+### Roll Back to a Previous State
 
-Every deployment creates a timestamped backup in `~/.dotfiles.bak/` with a SHA-256 manifest:
+Deployments create a timestamped backup in `~/.dotfiles.bak/` with a SHA-256 manifest:
 
 ```bash
 # Interactive rollback selector

@@ -1,10 +1,10 @@
 # rigrc
 
-*Declarative, high-performance Unix environment bootstrapper and dotfiles orchestrator in pure Bash.*
+*Declarative Unix bootstrapper and dotfiles manager in pure Bash.*
 
-> **Note:** Currently focused on CLI. Desktop and GUI configurations are planned for future updates (contributions welcome).
+> **Note:** rigrc currently targets CLI environments. Desktop and GUI configurations are planned for future releases.
 
-A compiled, zero-dependency single-file engine to provision reproducible Unix systems in seconds. Orchestrates cross-distro package managers (`apt`, `dnf`, `pacman`, `brew`, `mise`, `cmd`), automates modular dotfile deployment, injects optimized shell environments (`.bashrc`, `.inputrc`, `.profile`, `.gitconfig`), and manages atomic rollback snapshots out-of-the-box.
+A compiled, standalone single-file script to bootstrap Unix systems. It installs packages across package managers (`apt`, `dnf`, `pacman`, `brew`, `mise`, `cmd`), deploys dotfiles, configures shell environments (`.bashrc`, `.inputrc`, `.profile`, `.gitconfig`), and manages rollback snapshots.
 
 ## Quick Start
 
@@ -23,6 +23,8 @@ OPTIONS
     • -v, --verbose              Show verbose command output
     • -f, --force, --reset       Overwrite existing files and bypass locks
     •     --env <name>           Run specific environment
+    •     --skip-upgrade         Skip system package manager update and upgrade
+    •     --offline              Skip network checks and online package downloads
     • -y, --non-interactive      Run headlessly without interactive TUI
     •     --verify-scripts       Prompt before running custom scripts
     •     --list                 List available packages by group
@@ -38,11 +40,11 @@ OPTIONS
 
 ## Declarative Configuration
 
-Define machine profiles, package sets, granular overrides (`:append`, `:override`, `:disable`), environment variables, and dotfile templates in a single declarative `.conf` file. Deploy reproducibly across servers, workstations, WSL, and containers. Read **[Power User Guide](docs/POWERUSER_GUIDE.md)** to architect your setup.
+Define machine profiles, package sets, granular overrides (`:append`, `:override`, `:disable`), environment variables, and dotfile templates in a single `.conf` file. Works across Linux servers, workstations, WSL, and containers. See the **[Power User Guide](docs/POWERUSER_GUIDE.md)** for configuration workflows.
 
-## Contributing & Manifest Development
+## Contributing
 
-To extend package manifests or contribute engine improvements, see **[Contributing Guide](CONTRIBUTING.md)**.
+To add packages or contribute engine improvements, see the **[Contributing Guide](CONTRIBUTING.md)**.
 
 ## License
 

@@ -1,6 +1,6 @@
 # Contributing to rigrc
-
-Thank you for contributing! This document outlines guidelines for submitting package manifests, upstream improvements, and bug fixes.
+ 
+Guidelines for adding package manifests, improving the engine, and submitting pull requests.
 
 ---
 
@@ -8,44 +8,44 @@ Thank you for contributing! This document outlines guidelines for submitting pac
 
 > **Never edit `rigrc.sh` directly.**
 >
-> `rigrc.sh` is a compiled distribution bundle generated automatically by `build.sh` from `src/` modules, `src/base.conf`, and `packages/`. Any manual edits to `rigrc.sh` will be rejected by CI.
+> `rigrc.sh` is generated automatically by `build.sh` from `src/` modules, `src/base.conf`, and `packages/`. Any manual edits to `rigrc.sh` will fail CI checks.
 
 ---
 
 ## 2. Adding a New Package
 
-All packages live in declarative manifests under `packages/<category>/<tool>.conf`.
+Package manifests live under `packages/<category>/<tool>.conf`.
 
-### Checklist for New Packages
+### Package Manifest Checklist
 
-1. **Choose Category**: Place in an existing directory (`core`, `shell`, `dev-tools`, `runtimes`, `ai-agents`, `security-and-net`, `utilities`, `sys-info`) or propose a new group in `packages/_groups.conf`.
-2. **Multi-Distro Coverage**: Provide package targets for all standard package managers:
+1. **Category**: Place in an existing directory (`core`, `shell`, `dev-tools`, `runtimes`, `ai-agents`, `security-and-net`, `utilities`, `sys-info`) or define a new group in `packages/_groups.conf`.
+2. **Distro Targets**: Provide targets for package managers where available:
    - `apt` (Debian/Ubuntu)
    - `dnf` (Fedora/RHEL)
    - `pacman` (Arch)
    - `brew` (macOS)
    - `mise` (Polyglot tool & runtime manager)
-   - `cmd` (Custom installers)
-3. **Set Scope**:
-   - `scope = system`: Installed via system PM with `sudo`.
+   - `cmd` (Custom shell install scripts)
+3. **Scope**:
+   - `scope = system`: Installed via system package manager using `sudo`.
    - `scope = user`: Binary installed to `~/.local/bin` without root privileges.
-4. **Define Alternatives**: If replacing a standard Unix utility (e.g. `ls`, `cat`, `find`, `cd`), set `alt = <tool>`.
-5. **Add Sensible Defaults**:
-   - Configuration template: `[template:<path>:once]`
-   - Shell integration: `[bashrc]` block with command check guard (`if command -v <tool> >/dev/null 2>&1; then ... fi`).
-6. **Environment Gates**: If the tool is unsupported or unneeded in specific environments, add `cond = !container` or `cond = wsl`.
+4. **Alternatives**: If replacing a standard utility (such as `ls`, `cat`, `find`, or `cd`), set `alt = <tool>`.
+5. **Defaults & Integration**:
+   - Config template: `[template:<path>:once]`
+   - Shell integration: `[bashrc]` block with a command check guard (`if command -v <tool> >/dev/null 2>&1; then ... fi`).
+6. **Environment Conditions**: If the tool only applies to specific environments (or should be excluded from containers), add `cond = !container` or `cond = wsl`.
 
 ---
 
 ## 3. Formatting & Linting
 
-Before opening a pull request, run the static analysis and formatting tools:
+Format and validate manifests before submitting:
 
 ```bash
 # Format manifests and configuration files
 ./rigrc.sh --fmt
 
-# Run static syntax and schema validation
+# Run syntax and schema validation
 ./rigrc.sh --lint
 ```
 
@@ -53,7 +53,7 @@ Before opening a pull request, run the static analysis and formatting tools:
 
 ## 4. Building & Testing
 
-### Compile Standalone Distribution Bundle
+Build the bundle:
 
 ```bash
 make build
@@ -61,7 +61,7 @@ make build
 ./build.sh
 ```
 
-### Run Test Suite
+Run tests:
 
 ```bash
 make test
