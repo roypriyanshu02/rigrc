@@ -6,27 +6,45 @@
 # ---------------------------------------------------------------------------
 # Colors & Theme Foundation (Tier 0)
 # ---------------------------------------------------------------------------
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-    RESET=$'\033[0m' BOLD=$'\033[1m' DIM=$'\033[2m' ITALIC=$'\033[3m'
-    CLR_PRIMARY=$'\033[38;5;39m'   # Sky Blue / Electric Cyan
-    CLR_ACCENT=$'\033[38;5;213m'   # Soft Magenta
-    CLR_SUCCESS=$'\033[38;5;82m'   # Bright Emerald Green
-    CLR_WARN=$'\033[38;5;214m'      # Warm Amber Yellow
-    CLR_ERROR=$'\033[38;5;196m'     # Vivid Crimson Red
-    CLR_MUTED=$'\033[38;5;244m'     # Medium Slate Gray
-    CLR_TEXT=$'\033[38;5;255m'      # High-contrast White
-    CLR_CARD=$'\033[48;5;236m'      # Dark background card
-    SYM_OK="✓" SYM_FAIL="✗" SYM_WARN="!" SYM_INFO="i" SYM_Q="?" SYM_DOT="●" SYM_CIRCLE="○" SYM_BLOCKED="⊘" SYM_ARROW="↳"
-else
-    RESET='' BOLD='' DIM='' ITALIC=''
-    CLR_PRIMARY='' CLR_ACCENT='' CLR_SUCCESS='' CLR_WARN='' CLR_ERROR='' CLR_MUTED='' CLR_TEXT='' CLR_CARD=''
-    SYM_OK="[OK]" SYM_FAIL="[ERR]" SYM_WARN="[!]" SYM_INFO="[i]" SYM_Q="[?]" SYM_DOT="*" SYM_CIRCLE="o" SYM_BLOCKED="[-]" SYM_ARROW="->"
-fi
+_ui_init_theme() {
+    local color_enabled=0
+    if [[ -n "${FORCE_COLOR:-}" && "${FORCE_COLOR}" != "0" ]] || [[ -n "${CLICOLOR_FORCE:-}" && "${CLICOLOR_FORCE}" != "0" ]]; then
+        color_enabled=1
+    elif [[ ( -t 1 || -t 2 ) && -z "${NO_COLOR:-}" && "${CLICOLOR:-1}" != "0" && "${TERM:-}" != "dumb" ]]; then
+        color_enabled=1
+    fi
 
-# Standardized indentation constants (2-space increments)
-INDENT_1="  "
-INDENT_2="    "
-INDENT_3="      "
+    if [[ "$color_enabled" -eq 1 && "${RIGRC_THEME:-}" != "mono" && "${RIGRC_THEME:-}" != "plain" && "${RIGRC_THEME:-}" != "none" ]]; then
+        RESET=$'\033[0m' BOLD=$'\033[1m' DIM=$'\033[2m' ITALIC=$'\033[3m'
+
+        case "${RIGRC_THEME:-default}" in
+            amber|orange|warm)
+                CLR_PRIMARY=$'\033[1;33m'   # Bold Amber
+                CLR_ACCENT=$'\033[36m'      # Cyan
+                ;;
+            cyan|blue)
+                CLR_PRIMARY=$'\033[1;36m'   # Bold Cyan
+                CLR_ACCENT=$'\033[33m'      # Amber
+                ;;
+            *) # default / native: Adaptive Unix Native (Bold Blue + Amber)
+                CLR_PRIMARY=$'\033[1;34m'   # Bold Blue
+                CLR_ACCENT=$'\033[33m'      # Amber / Yellow
+                ;;
+        esac
+
+        CLR_SUCCESS=$'\033[32m'         # Green
+        CLR_WARN=$'\033[33m'            # Yellow / Amber
+        CLR_ERROR=$'\033[1;31m'         # Bold Red
+        CLR_MUTED=$'\033[90m'           # Slate Gray / Bright Black
+        CLR_TEXT=''                     # Adaptive text (inherits terminal foreground)
+    else
+        RESET='' BOLD='' DIM='' ITALIC=''
+        CLR_PRIMARY='' CLR_ACCENT='' CLR_SUCCESS='' CLR_WARN='' CLR_ERROR='' CLR_MUTED='' CLR_TEXT=''
+    fi
+
+    SYM_OK="✓" SYM_FAIL="✗" SYM_WARN="!" SYM_INFO="i" SYM_Q="?" SYM_DOT="●" SYM_CIRCLE="○" SYM_BLOCKED="⊘" SYM_ARROW="↳" SYM_BULLET="•" SYM_DASH="–"
+}
+_ui_init_theme
 
 # ---------------------------------------------------------------------------
 # UI Logging Primitives
@@ -46,18 +64,12 @@ _ui_header() {
     fi
 }
 
+_LAST_BELL_TIME=-999
 _ui_bell() {
     [[ "${NON_INTERACTIVE:-false}" == true || "${DOTFILES_NO_BELL:-false}" == true ]] && return 0
-    local bell_file="${TMPDIR:-/tmp}/.dotfiles_bell_$$"
-    local now
-    now="$(date +%s 2>/dev/null || printf '%s' "${SECONDS:-0}")"
-    local last=0
-    if [[ -f "$bell_file" ]]; then
-        last="$(<"$bell_file")" 2>/dev/null || last=0
-    fi
     local min_interval=45
-    if [[ $(( now - last )) -ge $min_interval ]]; then
-        printf '%s' "$now" > "$bell_file" 2>/dev/null || true
+    if [[ $(( SECONDS - _LAST_BELL_TIME )) -ge $min_interval ]]; then
+        _LAST_BELL_TIME=$SECONDS
         if [[ -t 2 || -c /dev/tty ]]; then
             printf '\a' >&2
         fi
@@ -86,9 +98,9 @@ _ui_input() {
     if [[ -t 2 && -c /dev/tty ]]; then
         local display_res
         if [[ -z "$res" ]]; then
-            display_res="${CLR_MUTED}↳ skipped${RESET}"
+            display_res="${CLR_MUTED}${SYM_ARROW} skipped${RESET}"
         else
-            display_res="${CLR_TEXT}↳ ${res}${RESET}"
+            display_res="${CLR_TEXT}${SYM_ARROW} ${res}${RESET}"
         fi
         printf '\033[1A\033[2K%s%-16s %s\n' "$ind" "${prompt}" "$display_res" >&2
     fi
@@ -132,20 +144,29 @@ _ui_select() {
     if [[ -t 0 && -t 2 && -c /dev/tty ]]; then
         local selected=0
         local total=${#opts[@]}
+        local menu_height=$(( total + 1 ))
         local key=""
         printf '\033[?25l' >&2 # Hide cursor
 
         _render_menu() {
-            printf '  %s %s\n' "${CLR_PRIMARY}${SYM_Q}${RESET}" "${BOLD}${prompt}${RESET}" >&2
+            local out_buf=""
+            out_buf+=$'\r\033[2K'"  ${CLR_PRIMARY}${SYM_Q}${RESET} ${BOLD}${prompt}${RESET}"$'\n'
             local i
             for i in "${!opts[@]}"; do
                 if [[ $i -eq $selected ]]; then
-                    printf '    %s %s\n' "${CLR_PRIMARY}●${RESET}" "${BOLD}${CLR_PRIMARY}${opts[$i]}${RESET}" >&2
+                    out_buf+=$'\r\033[2K'"    ${CLR_PRIMARY}${SYM_DOT}${RESET} ${BOLD}${CLR_PRIMARY}${opts[$i]}${RESET}"$'\n'
                 else
-                    printf '    %s %s\n' "${CLR_MUTED}○${RESET}" "${CLR_MUTED}${opts[$i]}${RESET}" >&2
+                    out_buf+=$'\r\033[2K'"    ${CLR_MUTED}${SYM_CIRCLE}${RESET} ${CLR_MUTED}${opts[$i]}${RESET}"$'\n'
                 fi
             done
+            printf '%s' "$out_buf" >&2
         }
+
+        local _pre
+        for (( _pre=0; _pre < menu_height; _pre++ )); do
+            printf '\n' >&2
+        done
+        printf '\r\033[%dA' "$menu_height" >&2
 
         _render_menu
 
@@ -157,10 +178,10 @@ _ui_select() {
             fi
 
             case "$key" in
-                $'\x1b[A'|k|K)
+                $'\x1b[A'|$'\x1bOA'|k|K)
                     selected=$(( (selected - 1 + total) % total ))
                     ;;
-                $'\x1b[B'|j|J)
+                $'\x1b[B'|$'\x1bOB'|j|J)
                     selected=$(( (selected + 1) % total ))
                     ;;
                 "")
@@ -178,12 +199,12 @@ _ui_select() {
                     ;;
             esac
 
-            printf '\033[%dA' "$((total + 1))" >&2
+            printf '\r\033[%dA' "$menu_height" >&2
             _render_menu
         done
 
         printf '\033[?25h' >&2 # Restore cursor
-        printf '\033[%dA\033[J' "$((total + 1))" >&2
+        printf '\r\033[%dA\033[J' "$menu_height" >&2
         printf '  %s %s: %s\n' "${CLR_SUCCESS}${SYM_OK}${RESET}" "${prompt}" "${CLR_PRIMARY}${BOLD}${opts[$selected]}${RESET}" >&2
         printf '%s' "${opts[$selected]}"
         return 0
@@ -263,38 +284,52 @@ _ui_multiselect() {
 
     local max_name_len=0
     local max_tag_len=0
+    local -a _ms_raw_tags=() _ms_tag_fmts=()
     local _idx
     for _idx in "${!_ms_items[@]}"; do
-        local _item="${_ms_items[$_idx]}"
-        local _lbl="${_ms_labels[$_idx]:-$_item}"
-        local _lock="${_ms_locks[$_idx]:-}"
+        local _item="${_ms_items[_idx]}"
+        local _lbl="${_ms_labels[_idx]:-$_item}"
+        local _lock="${_ms_locks[_idx]:-}"
         [[ ${#_lbl} -gt $max_name_len ]] && max_name_len=${#_lbl}
 
-        local _rtag=""
-        if [[ "$_lock" == "required" ]]; then
-            _rtag="required"
-        elif [[ "$_lock" == "installed:"* || "$_lock" == "installed" ]]; then
-            _rtag="installed"
-        elif [[ "$_lock" == "alt:"*" installed" ]]; then
-            local _at="${_lock#alt:}"
-            _at="${_at% installed}"
-            _rtag="alternative to ${_at} (installed)"
+        local _rtag="" _tfmt=""
+        if [[ "$_lock" == "config" ]]; then
+            _rtag="selected in config"
+            _tfmt="${CLR_PRIMARY}${_rtag}${RESET}"
+        elif [[ "$_lock" == "required" ]]; then
+            _rtag="core system"
+            _tfmt="${CLR_ACCENT}${_rtag}${RESET}"
+        elif [[ "$_lock" == "installed"* ]]; then
+            _rtag="already installed"
+            _tfmt="${CLR_MUTED}${_rtag}${RESET}"
         elif [[ "$_lock" == "alt:"* ]]; then
             local _at="${_lock#alt:}"
+            _at="${_at% installed}"
             _rtag="alternative to ${_at}"
+            _tfmt="${CLR_MUTED}${_rtag}${RESET}"
         elif [[ "$_lock" == "unsupported:"* ]]; then
             local _r="${_lock#unsupported:}"
             local _env_label="$(_format_env_name "$_r")"
             _rtag="unavailable on ${_env_label}"
-        elif [[ "$_lock" == "disabled:missing "* ]]; then
-            local _r="${_lock#disabled:missing }"
-            _rtag="requires ${_r}"
+            _tfmt="${CLR_WARN}${_rtag}${RESET}"
         elif [[ "$_lock" == "disabled"* ]]; then
-            _rtag="disabled in config"
+            _rtag="disabled"
+            _tfmt="${CLR_MUTED}${_rtag}${RESET}"
         fi
+        _ms_raw_tags[$_idx]="$_rtag"
+        _ms_tag_fmts[$_idx]="$_tfmt"
         [[ ${#_rtag} -gt $max_tag_len ]] && max_tag_len=${#_rtag}
     done
     local name_col_width=$(( max_name_len + 2 ))
+
+    local term_lines=24
+    if command -v tput >/dev/null 2>&1; then
+        term_lines="$(tput lines 2>/dev/null || echo 24)"
+    fi
+    local max_visible=$(( term_lines - 6 ))
+    [[ $max_visible -lt 5 ]] && max_visible=5
+    [[ $max_visible -gt $total ]] && max_visible=$total
+    local menu_height=$(( max_visible + 3 ))
 
     _render_ms_menu() {
         local cols=80
@@ -302,6 +337,8 @@ _ui_multiselect() {
             cols="$(tput cols 2>/dev/null || echo 80)"
         fi
         local ind="${LOG_INDENT:-  }"
+        local max_line_width=$(( cols - 1 ))
+        [[ $max_line_width -lt 20 ]] && max_line_width=20
 
         local display_prompt="$prompt"
         if [[ "$prompt" =~ ^Packages[[:space:]]+in[[:space:]]+\[(.*)\]$ ]]; then
@@ -310,20 +347,50 @@ _ui_multiselect() {
             display_prompt="Select package groups"
         fi
 
-        printf '%s%s\n' "$ind" "${BOLD}${display_prompt}${RESET}" >&2
-        printf '%s%s\n\n' "$ind" "${CLR_MUTED}Space toggle · A all · Enter continue${RESET}" >&2
-
-        local avail_space=$(( cols - ${#ind} - 6 - name_col_width ))
-        local desc_col_width
-        if [[ $max_tag_len -gt 0 ]]; then
-            desc_col_width=$(( avail_space - max_tag_len - 2 ))
-        else
-            desc_col_width=$(( avail_space - 2 ))
+        local hint_text="Space toggle · A all · Enter continue"
+        if [[ $total -gt $max_visible ]]; then
+            hint_text="Space toggle · A all · Enter continue ($(( selected + 1 ))/${total})"
         fi
-        [[ $desc_col_width -lt 16 ]] && desc_col_width=16
+
+        local out_buf=""
+        out_buf+=$'\r\033[2K'"${ind}${BOLD}${display_prompt}${RESET}"$'\n'
+        out_buf+=$'\r\033[2K'"${ind}${CLR_MUTED}${hint_text}${RESET}"$'\n\r\033[2K\n'
+
+        local eff_name_width=$name_col_width
+        local max_allowed_name=$(( max_line_width / 3 ))
+        [[ $max_allowed_name -lt 12 ]] && max_allowed_name=12
+        [[ $eff_name_width -gt $max_allowed_name ]] && eff_name_width=$max_allowed_name
+
+        local prefix_len=$(( ${#ind} + 5 + eff_name_width ))
+        local avail_space=$(( max_line_width - prefix_len ))
+
+        local desc_col_width=0
+        if [[ $max_tag_len -gt 0 ]]; then
+            if [[ $avail_space -ge $(( max_tag_len + 10 )) ]]; then
+                desc_col_width=$(( avail_space - max_tag_len - 2 ))
+            else
+                desc_col_width=0
+            fi
+        else
+            desc_col_width=$(( avail_space > 0 ? avail_space : 0 ))
+        fi
+
+        local win_start=0
+        local win_end=$total
+        if [[ $total -gt $max_visible ]]; then
+            local half=$(( max_visible / 2 ))
+            win_start=$(( selected - half ))
+            [[ $win_start -lt 0 ]] && win_start=0
+            win_end=$(( win_start + max_visible ))
+            if [[ $win_end -gt $total ]]; then
+                win_end=$total
+                win_start=$(( total - max_visible ))
+                [[ $win_start -lt 0 ]] && win_start=0
+            fi
+        fi
 
         local i
-        for i in "${!_ms_items[@]}"; do
+        for (( i = win_start; i < win_end; i++ )); do
             local item="${_ms_items[$i]}"
             local lbl="${_ms_labels[$i]:-$item}"
             local desc="${_ms_descs[$i]:-}"
@@ -336,6 +403,8 @@ _ui_multiselect() {
             elif [[ "$lock" == "installed:"* || "$lock" == "installed" ]]; then
                 radio_icon="${CLR_SUCCESS}${SYM_OK}${RESET}"
             elif [[ "$lock" == "required" ]]; then
+                radio_icon="${CLR_ACCENT}${SYM_DOT}${RESET}"
+            elif [[ "$lock" == "config" ]]; then
                 radio_icon="${CLR_PRIMARY}${SYM_DOT}${RESET}"
             elif [[ "$st" -eq 1 ]]; then
                 radio_icon="${CLR_PRIMARY}${SYM_DOT}${RESET}"
@@ -343,79 +412,89 @@ _ui_multiselect() {
                 radio_icon="${CLR_MUTED}${SYM_CIRCLE}${RESET}"
             fi
 
-            local raw_tag="" tag_fmt=""
-            if [[ "$lock" == "required" ]]; then
-                raw_tag="required"
-                tag_fmt="${CLR_ACCENT}${raw_tag}${RESET}"
-            elif [[ "$lock" == "installed:"* || "$lock" == "installed" ]]; then
-                raw_tag="installed"
-                tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
-            elif [[ "$lock" == "alt:"*" installed" ]]; then
-                local alt_target="${lock#alt:}"
-                alt_target="${alt_target% installed}"
-                raw_tag="alternative to ${alt_target} (installed)"
-                tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
-            elif [[ "$lock" == "alt:"* ]]; then
-                local alt_target="${lock#alt:}"
-                raw_tag="alternative to ${alt_target}"
-                tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
-            elif [[ "$lock" == "unsupported:"* ]]; then
-                local reason="${lock#unsupported:}"
-                local env_label="$(_format_env_name "$reason")"
-                raw_tag="unavailable on ${env_label}"
-                tag_fmt="${CLR_WARN}${raw_tag}${RESET}"
-            elif [[ "$lock" == "disabled:missing "* ]]; then
-                local req_dep="${lock#disabled:missing }"
-                raw_tag="requires ${req_dep}"
-                tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
-            elif [[ "$lock" == "disabled"* ]]; then
-                raw_tag="disabled in config"
-                tag_fmt="${CLR_MUTED}${raw_tag}${RESET}"
-            fi
+            local raw_tag="${_ms_raw_tags[$i]:-}" tag_fmt="${_ms_tag_fmts[$i]:-}"
 
-            local pad_len=$(( name_col_width - ${#lbl} ))
+            local cur_lbl="$lbl"
+            if [[ ${#cur_lbl} -gt $eff_name_width ]]; then
+                cur_lbl="${cur_lbl:0:$((eff_name_width - 1))}…"
+            fi
+            local pad_len=$(( eff_name_width - ${#cur_lbl} ))
             [[ $pad_len -lt 1 ]] && pad_len=1
             local pad_spaces
             printf -v pad_spaces '%*s' "$pad_len" ""
 
             local cur_desc="$desc"
-            if [[ -n "$cur_desc" ]]; then
+            local desc_fmt=""
+            local desc_spaces=""
+            if [[ $desc_col_width -gt 0 && -n "$cur_desc" ]]; then
                 if [[ ${#cur_desc} -gt $desc_col_width ]]; then
                     cur_desc="${cur_desc:0:$((desc_col_width - 1))}…"
                 fi
-            fi
-
-            local desc_spaces=""
-            if [[ $max_tag_len -gt 0 ]]; then
                 local desc_pad=$(( desc_col_width - ${#cur_desc} ))
                 [[ $desc_pad -lt 1 ]] && desc_pad=1
                 printf -v desc_spaces '%*s' "$desc_pad" ""
+                if [[ $i -eq $selected && "$lock" != "disabled"* && "$lock" != "unsupported:"* ]]; then
+                    desc_fmt="${CLR_TEXT}${cur_desc}${RESET}"
+                else
+                    desc_fmt="${CLR_MUTED}${cur_desc}${RESET}"
+                fi
             fi
 
+            local cur_tag="$raw_tag"
+            local cur_tag_fmt="$tag_fmt"
+            if [[ -n "$cur_tag" ]]; then
+                local used_len=$(( ${#ind} + 5 + ${#cur_lbl} + pad_len + ${#cur_desc} + ${#desc_spaces} ))
+                local tag_space=$(( max_line_width - used_len ))
+                if [[ $tag_space -gt 0 && ${#cur_tag} -gt $tag_space ]]; then
+                    cur_tag="${cur_tag:0:$((tag_space - 1))}…"
+                    if [[ "$lock" == "required" ]]; then
+                        cur_tag_fmt="${CLR_ACCENT}${cur_tag}${RESET}"
+                    elif [[ "$lock" == "unsupported:"* ]]; then
+                        cur_tag_fmt="${CLR_WARN}${cur_tag}${RESET}"
+                    else
+                        cur_tag_fmt="${CLR_MUTED}${cur_tag}${RESET}"
+                    fi
+                elif [[ $tag_space -le 0 ]]; then
+                    cur_tag_fmt=""
+                fi
+            fi
+
+            local lbl_color
             if [[ $i -eq $selected ]]; then
                 if [[ "$lock" == "disabled"* || "$lock" == "unsupported:"* ]]; then
-                    local desc_fmt=""
-                    [[ -n "$cur_desc" ]] && desc_fmt="${CLR_MUTED}${cur_desc}${RESET}"
-                    printf '%s  %s  %s%s%s%s%s\n' "$ind" "$radio_icon" "${BOLD}${CLR_MUTED}${lbl}${RESET}" "$pad_spaces" "$desc_fmt" "$desc_spaces" "$tag_fmt" >&2
+                    lbl_color="${BOLD}${CLR_MUTED}"
                 else
-                    local desc_fmt=""
-                    [[ -n "$cur_desc" ]] && desc_fmt="${CLR_TEXT}${cur_desc}${RESET}"
-                    printf '%s  %s  %s%s%s%s%s\n' "$ind" "$radio_icon" "${BOLD}${CLR_PRIMARY}${lbl}${RESET}" "$pad_spaces" "$desc_fmt" "$desc_spaces" "$tag_fmt" >&2
+                    lbl_color="${BOLD}${CLR_PRIMARY}"
                 fi
             else
-                local desc_fmt=""
-                [[ -n "$cur_desc" ]] && desc_fmt="${CLR_MUTED}${cur_desc}${RESET}"
-                printf '%s  %s  %s%s%s%s%s\n' "$ind" "$radio_icon" "${CLR_MUTED}${lbl}${RESET}" "$pad_spaces" "$desc_fmt" "$desc_spaces" "$tag_fmt" >&2
+                lbl_color="${CLR_MUTED}"
             fi
+
+            out_buf+=$'\r\033[2K'"${ind}  ${radio_icon}  ${lbl_color}${cur_lbl}${RESET}${pad_spaces}${desc_fmt}${desc_spaces}${cur_tag_fmt}"$'\n'
         done
+
+        printf '%s' "$out_buf" >&2
     }
 
     # WINCH signal trap for window resizing
     _on_winch() {
-        printf '\033[%dA\033[J' "$((total + 3))" >&2
+        if command -v tput >/dev/null 2>&1; then
+            term_lines="$(tput lines 2>/dev/null || echo 24)"
+        fi
+        max_visible=$(( term_lines - 6 ))
+        [[ $max_visible -lt 5 ]] && max_visible=5
+        [[ $max_visible -gt $total ]] && max_visible=$total
+        menu_height=$(( max_visible + 3 ))
+        printf '\r\033[%dA\033[J' "$menu_height" >&2
         _render_ms_menu
     }
     trap '_on_winch' WINCH
+
+    local _pre
+    for (( _pre=0; _pre < menu_height; _pre++ )); do
+        printf '\n' >&2
+    done
+    printf '\r\033[%dA' "$menu_height" >&2
 
     _render_ms_menu
 
@@ -424,18 +503,35 @@ _ui_multiselect() {
         if [[ "$key" == $'\x1b' ]]; then
             read -rsn2 -t 0.1 rest < /dev/tty 2>/dev/null || rest=""
             key+="$rest"
+            while read -rsn1 -t 0.01 extra < /dev/tty 2>/dev/null; do
+                key+="$extra"
+            done
         fi
 
         case "$key" in
-            $'\x1b[A'|k|K)
+            $'\x1b[A'|$'\x1bOA'|k|K)
                 selected=$(( (selected - 1 + total) % total ))
                 ;;
-            $'\x1b[B'|j|J)
+            $'\x1b[B'|$'\x1bOB'|j|J)
                 selected=$(( (selected + 1) % total ))
+                ;;
+            $'\x1b[5~') # Page Up
+                selected=$(( selected - max_visible ))
+                [[ $selected -lt 0 ]] && selected=0
+                ;;
+            $'\x1b[6~') # Page Down
+                selected=$(( selected + max_visible ))
+                [[ $selected -ge $total ]] && selected=$(( total - 1 ))
+                ;;
+            $'\x1b[H'|$'\x1b[1~') # Home
+                selected=0
+                ;;
+            $'\x1b[F'|$'\x1b[4~') # End
+                selected=$(( total - 1 ))
                 ;;
             " "|x|X)
                 local cur_lock="${_ms_locks[$selected]:-}"
-                if [[ "$cur_lock" != "required" && "$cur_lock" != "installed:"* && "$cur_lock" != "unsupported:"* && "$cur_lock" != "disabled"* ]]; then
+                if [[ "$cur_lock" != "required" && "$cur_lock" != "config" && "$cur_lock" != "installed:"* && "$cur_lock" != "unsupported:"* && "$cur_lock" != "disabled"* ]]; then
                     if [[ "${_ms_states[$selected]:-0}" -eq 1 ]]; then
                         _ms_states[$selected]=0
                     else
@@ -448,7 +544,7 @@ _ui_multiselect() {
                 local j
                 for j in "${!_ms_items[@]}"; do
                     local j_lock="${_ms_locks[$j]:-}"
-                    if [[ "$j_lock" != "required" && "$j_lock" != "installed:"* && "$j_lock" != "unsupported:"* && "$j_lock" != "disabled"* ]]; then
+                    if [[ "$j_lock" != "required" && "$j_lock" != "config" && "$j_lock" != "installed:"* && "$j_lock" != "unsupported:"* && "$j_lock" != "disabled"* ]]; then
                         if [[ "${_ms_states[$j]:-0}" -ne 1 ]]; then
                             all_toggleable_checked=0
                             break
@@ -457,7 +553,7 @@ _ui_multiselect() {
                 done
                 for j in "${!_ms_items[@]}"; do
                     local j_lock="${_ms_locks[$j]:-}"
-                    if [[ "$j_lock" != "required" && "$j_lock" != "installed:"* && "$j_lock" != "unsupported:"* && "$j_lock" != "disabled"* ]]; then
+                    if [[ "$j_lock" != "required" && "$j_lock" != "config" && "$j_lock" != "installed:"* && "$j_lock" != "unsupported:"* && "$j_lock" != "disabled"* ]]; then
                         if [[ $all_toggleable_checked -eq 1 ]]; then
                             _ms_states[$j]=0
                         else
@@ -471,14 +567,14 @@ _ui_multiselect() {
                 ;;
         esac
 
-        printf '\033[%dA' "$((total + 3))" >&2
+        printf '\r\033[%dA' "$menu_height" >&2
         _render_ms_menu
     done
 
     trap - WINCH
 
     printf '\033[?25h' >&2
-    printf '\033[%dA\033[J' "$((total + 3))" >&2
+    printf '\r\033[%dA\033[J' "$menu_height" >&2
 
     local chosen_ids=()
     local chosen_lbls=()
@@ -509,7 +605,7 @@ _set_term_title() {
 }
 
 _ui_phase() {
-    local num="$1" total="$2" title="$3"
+    local title="${3:-$1}"
     _set_term_title "Dotfiles: ${title}"
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
         printf '\n%s\n' "${CLR_TEXT}${BOLD}${title}${RESET}" >&2
@@ -519,26 +615,26 @@ _ui_phase() {
 }
 
 _get_remediation_hint() {
-    local err_text="$1"
-    if [[ "$err_text" == *"lock"* || "$err_text" == *"Could not get lock"* ]]; then
-        printf 'Package manager lock busy. Wait for background update or clear stale lock.'
-    elif [[ "$err_text" == *"404"* || "$err_text" == *"Not Found"* ]]; then
-        printf 'Asset not found on release server. Check release URL and target architecture.'
-    elif [[ "$err_text" == *"403"* || "$err_text" == *"rate limit"* || "$err_text" == *"Rate limit"* ]]; then
-        printf 'GitHub API rate limit exceeded. Set GITHUB_TOKEN to proceed.'
-    elif [[ "$err_text" == *"Permission denied"* || "$err_text" == *"permission denied"* ]]; then
-        printf 'Permission denied. Run with sudo or fix target path permissions.'
-    elif [[ "$err_text" == *"checksum mismatch"* || "$err_text" == *"Checksum mismatch"* ]]; then
-        printf 'Checksum mismatch. Downloaded archive is corrupted or modified.'
-    elif [[ "$err_text" == *"No space left"* || "$err_text" == *"no space left"* ]]; then
-        printf 'Disk space exhausted. Free up disk space on target filesystem.'
-    elif [[ "$err_text" == *"timed out"* || "$err_text" == *"Timed out"* || "$err_text" == *"Operation timed out"* ]]; then
-        printf 'Operation timed out. Check network connection or increase INSTALL_TIMEOUT.'
-    elif [[ "$err_text" == *"SSL"* || "$err_text" == *"certificate"* || "$err_text" == *"TLS"* ]]; then
-        printf 'SSL/TLS certificate error. Verify system time and CA certificates.'
-    elif [[ "$err_text" == *"Connection refused"* || "$err_text" == *"Couldn't connect to server"* ]]; then
-        printf 'Connection refused. Check internet connectivity and proxy settings.'
-    fi
+    case "${1,,}" in
+        *lock*|*"could not get lock"*)
+            printf 'Package manager lock busy. Wait for background update or clear stale lock.' ;;
+        *404*|*"not found"*)
+            printf 'Asset not found on release server. Check release URL and target architecture.' ;;
+        *403*|*"rate limit"*)
+            printf 'GitHub API rate limit exceeded. Set GITHUB_TOKEN to proceed.' ;;
+        *"permission denied"*)
+            printf 'Permission denied. Run with sudo or fix target path permissions.' ;;
+        *"checksum mismatch"*)
+            printf 'Checksum mismatch. Downloaded archive is corrupted or modified.' ;;
+        *"no space left"*)
+            printf 'Disk space exhausted. Free up disk space on target filesystem.' ;;
+        *"timed out"*)
+            printf 'Operation timed out. Check network connection or increase INSTALL_TIMEOUT.' ;;
+        *ssl*|*certificate*|*tls*)
+            printf 'SSL/TLS certificate error. Verify system time and CA certificates.' ;;
+        *"connection refused"*|*"couldn't connect to server"*)
+            printf 'Connection refused. Check internet connectivity and proxy settings.' ;;
+    esac
 }
 
 _extract_last_error() {
@@ -673,7 +769,7 @@ _run_with_spinner() {
         printf '\r\033[2K%s%s %s %s\n' "$ind" "${CLR_ERROR}${BOLD}${SYM_FAIL}${RESET}" "${CLR_ERROR}${display_base} (failed)${RESET}" "${final_meta}" >&2
         _LAST_CMD_ERROR="$(_extract_last_error "$cmd_log")"
         if [[ -n "$_LAST_CMD_ERROR" ]]; then
-            printf '%s  %s %s\n' "$ind" "${CLR_ERROR}↳${RESET}" "${CLR_MUTED}${_LAST_CMD_ERROR}${RESET}" >&2
+            printf '%s  %s %s\n' "$ind" "${CLR_ERROR}${SYM_ARROW}${RESET}" "${CLR_MUTED}${_LAST_CMD_ERROR}${RESET}" >&2
             local rhint
             rhint="$(_get_remediation_hint "$_LAST_CMD_ERROR")"
             [[ -n "$rhint" ]] && printf '%s    %s %s\n' "$ind" "${CLR_WARN}hint:${RESET}" "${CLR_MUTED}${rhint}${RESET}" >&2
@@ -727,7 +823,7 @@ _ui_render_summary() {
         printf '%s\n' "${BOLD}${CLR_WARN}Warnings${RESET}" >&2
         local w
         for w in "${_WARNING_MESSAGES[@]}"; do
-            printf '  %s %s\n' "${CLR_WARN}!${RESET}" "$w" >&2
+            printf '  %s %s\n' "${CLR_WARN}${SYM_WARN}${RESET}" "$w" >&2
         done
     fi
 
@@ -737,8 +833,8 @@ _ui_render_summary() {
         local fp
         for fp in "${_FAILED_PACKAGES[@]}"; do
             local r="${_FAILURE_REASONS["$fp"]:-unknown error}"
-            printf '  %s %s\n' "${CLR_ERROR}✗${RESET}" "${BOLD}${fp}${RESET}" >&2
-            printf '    %s %s\n' "${CLR_ERROR}↳${RESET}" "${CLR_MUTED}${r}${RESET}" >&2
+            printf '  %s %s\n' "${CLR_ERROR}${BOLD}${SYM_FAIL}${RESET}" "${BOLD}${fp}${RESET}" >&2
+            printf '    %s %s\n' "${CLR_ERROR}${SYM_ARROW}${RESET}" "${CLR_MUTED}${r}${RESET}" >&2
             local rhint
             rhint="$(_get_remediation_hint "$r")"
             [[ -n "$rhint" ]] && printf '      %s %s\n' "${CLR_WARN}hint:${RESET}" "${CLR_MUTED}${rhint}${RESET}" >&2
