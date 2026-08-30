@@ -178,10 +178,12 @@ _find_pkg_manifest() {
     local cand
     for cand in "$pdir"/*/"${target}.conf"; do
         if [[ -f "$cand" ]]; then
+            REPLY="$cand"
             printf '%s' "$cand"
             return 0
         fi
     done
+    REPLY=""
     return 1
 }
 
@@ -256,7 +258,7 @@ _install_single_package() {
 
     local pm_key="${_PM:-}"
     [[ "$pm_key" == "apt-get" ]] && pm_key="apt"
-    local group="$(basename "$(dirname "$conf_file")")"
+    local group="${conf_file%/*}"; group="${group##*/}"
     local target_key="${group}/${pkg_id}"
     local pm_cmd="${_CONF_PKG_KEYS["${target_key}:${pm_key}.cmd"]:-${_CONF_PKG_KEYS["${pkg_id}:${pm_key}.cmd"]:-${_CONF_PKG_KEYS["${cpkg}:${pm_key}.cmd"]:-}}}"
     [[ -z "$pm_cmd" ]] && pm_cmd="$(_get_opt "${pm_key}.cmd" "$rest")"
@@ -326,7 +328,8 @@ _install_single_package() {
         local saved_ifs="$IFS"
         IFS=','
         for need_item in $needs_spec; do
-            need_item="$(_trim "$need_item")"
+            need_item="${need_item#"${need_item%%[![:space:]]*}"}"
+            need_item="${need_item%"${need_item##*[![:space:]]}"}"
             [[ -z "$need_item" ]] && continue
             if ! _resolve_missing_dependency "$pkg_id" "$need_item"; then
                 IFS="$saved_ifs"
@@ -548,7 +551,8 @@ install_packages() {
                 local saved_ifs="$IFS"
                 IFS=','
                 for need_item in $needs_spec; do
-                    need_item="$(_trim "$need_item")"
+                    need_item="${need_item#"${need_item%%[![:space:]]*}"}"
+                    need_item="${need_item%"${need_item##*[![:space:]]}"}"
                     [[ -z "$need_item" ]] && continue
                     if [[ "${_CONF_PKG_DISABLED["$need_item"]:-0}" -eq 1 || "${_CONF_PKG_DECLINED["$need_item"]:-0}" -eq 1 ]]; then
                         needs_missing="$need_item"

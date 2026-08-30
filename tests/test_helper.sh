@@ -119,6 +119,7 @@ reset_test_state() {
     _SYS_ENV_CACHE=""
     _SYS_IS_WSL_CACHE=""
     _SYS_IS_CONTAINER_CACHE=""
+    _SYS_OS_CACHE=""
     DRY_RUN=false
     VERBOSE=false
     FORCE=false

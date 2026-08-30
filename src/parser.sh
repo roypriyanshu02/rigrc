@@ -20,7 +20,10 @@ _UNMET_COND=""
 # Evaluate cond field or cond: option. Returns 0 = proceed, 1 = skip.
 _eval_cond() {
     local cond="$1" opts="${2:-}"
-    [[ -z "$cond" ]] && cond="$(_get_opt cond "$opts")"
+    if [[ -z "$cond" && -n "$opts" ]]; then
+        _get_opt cond "$opts" >/dev/null || true
+        cond="$OPT_REPLY"
+    fi
     [[ -z "$cond" ]] && return 0
 
     if [[ "${_CONF_CASCADE_DONE:-0}" -eq 0 && -d "${PACKAGES_DIR:-}" ]]; then
@@ -30,11 +33,15 @@ _eval_cond() {
     local cond_override="${_CONF_PKG_KEYS["global:cond"]:-${_CONF_PKG_KEYS["global:COND"]:-${COND:-}}}"
     local dis_cond_override="${_CONF_PKG_KEYS["global:disable_cond"]:-${_CONF_PKG_KEYS["global:DISABLE_COND"]:-${DISABLE_COND:-}}}"
 
-    local c sys_arch _conds not_c
-    sys_arch="$(_get_arch)"
+    [[ -z "${_SYS_ARCH_CACHE:-}" || -z "${_SYS_ENV_CACHE:-}" ]] && _init_sys_info
+
+    local c sys_arch sys_env _conds not_c
+    sys_arch="${_SYS_ARCH_CACHE:-unknown}"
+    sys_env="${_SYS_ENV_CACHE:-default}"
     IFS=',' read -ra _conds <<< "$cond"
     for c in "${_conds[@]}"; do
-        c="$(_trim "$c")"
+        c="${c#"${c%%[![:space:]]*}"}"
+        c="${c%"${c##*[![:space:]]}"}"
         [[ -z "$c" ]] && continue
 
         if [[ "$c" == *"!"* ]]; then
@@ -64,14 +71,14 @@ _eval_cond() {
 
         local passed=0
         case "$bare_c" in
-            desktop)                              [[ "$(_get_env)" == "desktop" ]] && passed=1 ;;
-            '!desktop')                           [[ "$(_get_env)" != "desktop" ]] && passed=1 ;;
-            linux)                                [[ "$(uname -s)" == Linux ]] && passed=1 ;;
-            '!linux')                             [[ "$(uname -s)" != Linux ]] && passed=1 ;;
+            desktop)                              [[ "$sys_env" == "desktop" ]] && passed=1 ;;
+            '!desktop')                           [[ "$sys_env" != "desktop" ]] && passed=1 ;;
+            linux)                                [[ "${_SYS_OS_CACHE:-Linux}" == Linux ]] && passed=1 ;;
+            '!linux')                             [[ "${_SYS_OS_CACHE:-Linux}" != Linux ]] && passed=1 ;;
             wsl)                                  _is_wsl && passed=1 ;;
             '!wsl')                               ! _is_wsl && passed=1 ;;
-            vps)                                  [[ "$(_get_env)" == "vps" ]] && passed=1 ;;
-            '!vps')                               [[ "$(_get_env)" != "vps" ]] && passed=1 ;;
+            vps)                                  [[ "$sys_env" == "vps" ]] && passed=1 ;;
+            '!vps')                               [[ "$sys_env" != "vps" ]] && passed=1 ;;
             container)                            _is_container && passed=1 ;;
             '!container')                         ! _is_container && passed=1 ;;
             arch:x86_64|x86_64|arch:amd64|amd64)     [[ "$sys_arch" == x86_64 ]] && passed=1 ;;
@@ -119,14 +126,18 @@ _preload_groups_conf() {
     if [[ ! -f "$groups_conf" ]]; then
         local gdir
         for gdir in "$PACKAGES_DIR"/*; do
-            [[ -d "$gdir" ]] && _GROUPS_LIST+=("$(basename "$gdir")")
+            if [[ -d "$gdir" ]]; then
+                local gbname="${gdir##*/}"
+                _GROUPS_LIST+=("$gbname")
+            fi
         done
         return 0
     fi
 
     local current_grp="" raw_line line
     while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
-        line="$(_trim "$raw_line")"
+        line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" || "$line" == '#'* ]] && continue
         if [[ "$line" =~ ^\[group:([a-zA-Z0-9_.-]+) ]]; then
             current_grp="${BASH_REMATCH[1]}"
@@ -135,8 +146,10 @@ _preload_groups_conf() {
         fi
         if [[ -n "$current_grp" && "$line" == *"="* ]]; then
             local k="${line%%=*}" v="${line#*=}"
-            k="$(_trim "$k")"
-            v="$(_trim "$v")"
+            k="${k#"${k%%[![:space:]]*}"}"
+            k="${k%"${k##*[![:space:]]}"}"
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
             case "$k" in
                 description) _GROUP_DESCS["$current_grp"]="$v" ;;
                 packages)    _GROUP_PACKAGES_MAP["$current_grp"]="$v" ;;
@@ -240,8 +253,8 @@ _parse_section_header() {
     local -n _out_mod="$4"
     local -n _out_valid="$5"
 
-    local _psh_hdr
-    _psh_hdr="$(_trim "$_psh_raw")"
+    local _psh_hdr="${_psh_raw#"${_psh_raw%%[![:space:]]*}"}"
+    _psh_hdr="${_psh_hdr%"${_psh_hdr##*[![:space:]]}"}"
     if [[ -z "$_psh_hdr" ]]; then
         _out_type="" _out_ident="" _out_mod="append" _out_valid=1
         return 0
@@ -337,7 +350,8 @@ _parse_single_conf_file() {
     }
 
     while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
-        line="$(_trim "$raw_line")"
+        line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
 
         if [[ "$line" =~ ^\[(.*)\]$ ]]; then
             local header="${BASH_REMATCH[1]}"
@@ -403,8 +417,11 @@ _parse_single_conf_file() {
             [[ -z "$line" || "$line" == '#'* ]] && continue
             if [[ "$line" == *"="* ]]; then
                 local key="${line%%=*}" val="${line#*=}"
-                key="$(_trim "${key,,}")"
-                val="$(_trim "$val")"
+                key="${key#"${key%%[![:space:]]*}"}"
+                key="${key%"${key##*[![:space:]]}"}"
+                key="${key,,}"
+                val="${val#"${val%%[![:space:]]*}"}"
+                val="${val%"${val##*[![:space:]]}"}"
                 if [[ "$val" == "!delete" ]]; then
                     unset "_CONF_PKG_KEYS[${cur_ident}:${key}]"
                     cur_last_key=""
@@ -413,7 +430,8 @@ _parse_single_conf_file() {
                     cur_last_key="$key"
                 fi
             elif [[ -n "${cur_last_key:-}" ]]; then
-                local cont_val="$(_trim "$line")"
+                local cont_val="${line#"${line%%[![:space:]]*}"}"
+                cont_val="${cont_val%"${cont_val##*[![:space:]]}"}"
                 if [[ -n "$cont_val" ]]; then
                     local existing="${_CONF_PKG_KEYS["${cur_ident}:${cur_last_key}"]:-}"
                     if [[ "$existing" == *"," ]]; then
@@ -437,8 +455,8 @@ _finalize_conf_caches() {
     for conf_file in "$pdir"/*/*.conf; do
         [[ ! -f "$conf_file" ]] && continue
         local pkg group target_key
-        pkg="$(basename "$conf_file" .conf)"
-        group="$(basename "$(dirname "$conf_file")")"
+        pkg="${conf_file##*/}"; pkg="${pkg%.conf}"
+        group="${conf_file%/*}"; group="${group##*/}"
         target_key="${group}/${pkg}"
 
         local p_name="${_CONF_PKG_KEYS["${pkg}:name"]:-${_CONF_PKG_KEYS["${target_key}:name"]:-$pkg}}"
@@ -485,8 +503,14 @@ _finalize_conf_caches() {
         _CONF_PKG_BIN["$conf_file"]="$p_bin"
         _CONF_PKG_DESC["$conf_file"]="$p_desc"
         _CONF_PKG_SCOPE["$conf_file"]="$p_scope"
-        _CONF_PKG_INSTALL["$conf_file"]="$(_trim "$inst_specs")"
-        _CONF_PKG_OPTS["$conf_file"]="$(_trim "$opt_specs")"
+
+        inst_specs="${inst_specs#"${inst_specs%%[![:space:]]*}"}"
+        inst_specs="${inst_specs%"${inst_specs##*[![:space:]]}"}"
+        _CONF_PKG_INSTALL["$conf_file"]="$inst_specs"
+
+        opt_specs="${opt_specs#"${opt_specs%%[![:space:]]*}"}"
+        opt_specs="${opt_specs%"${opt_specs##*[![:space:]]}"}"
+        _CONF_PKG_OPTS["$conf_file"]="$opt_specs"
 
         if [[ "${_CONF_BASHRC_DIS["$pkg"]:-${_CONF_BASHRC_DIS["$target_key"]:-0}}" -ne 1 ]]; then
             _CONF_BASHRC["$conf_file"]="${_CONF_BASHRC_BUF["$pkg"]:-${_CONF_BASHRC_BUF["$target_key"]:-}}"
@@ -515,8 +539,7 @@ _select_config_file() {
     local cfg
     for cfg in "$sdir"/*.conf; do
         [[ ! -f "$cfg" ]] && continue
-        local bname
-        bname="$(basename "$cfg")"
+        local bname="${cfg##*/}"
         [[ "$bname" == "example.conf" ]] && continue
         available_configs+=("$bname")
     done
@@ -541,6 +564,7 @@ _preload_all_manifests() {
     [[ "$_CONF_CASCADE_DONE" -eq 1 ]] && return 0
     _CONF_CASCADE_DONE=1
 
+    _init_sys_info
     _select_config_file
     _preload_groups_conf
 
@@ -607,7 +631,8 @@ _get_default_pkg_name() {
         local rel="${mfile#"$PACKAGES_DIR/"}"
         printf '%s' "${rel%.conf}"
     else
-        basename "$mfile" .conf
+        local b="${mfile##*/}"
+        printf '%s' "${b%.conf}"
     fi
 }
 
@@ -641,32 +666,45 @@ _parse_manifest_file() {
 
 _package_is_active() {
     local mfile="$1"
-    local default_pkg="$(_get_default_pkg_name "$mfile")"
+    local default_pkg
+    if [[ "$mfile" == "$PACKAGES_DIR"/*/*.conf ]]; then
+        local rel="${mfile#"$PACKAGES_DIR/"}"
+        default_pkg="${rel%.conf}"
+    else
+        local b="${mfile##*/}"
+        default_pkg="${b%.conf}"
+    fi
 
     _parse_manifest_file "$mfile" "$default_pkg"
     local rest="${pkg_install}${pkg_install:+ }${pkg_opts}"
 
     [[ "${_CONF_PKG_DECLINED["$default_pkg"]:-0}" -eq 1 || "${_CONF_PKG_DECLINED["$pkg_name"]:-0}" -eq 1 ]] && return 1
-    [[ "$(_get_opt disabled "$rest")" == true ]] && return 1
+    _get_opt disabled "$rest" >/dev/null || true
+    [[ "$OPT_REPLY" == true ]] && return 1
     _eval_cond "" "$rest" || return 1
 
-    local needs_spec="$(_get_opt needs "$rest")"
+    _get_opt needs "$rest" >/dev/null || true
+    local needs_spec="$OPT_REPLY"
     if [[ -n "$needs_spec" ]]; then
         local need_item
         local saved_ifs="$IFS"
         IFS=','
         for need_item in $needs_spec; do
-            need_item="$(_trim "$need_item")"
+            need_item="${need_item#"${need_item%%[![:space:]]*}"}"
+            need_item="${need_item%"${need_item##*[![:space:]]}"}"
             [[ -z "$need_item" ]] && continue
             if [[ "${_CONF_PKG_DISABLED["$need_item"]:-0}" -eq 1 || "${_CONF_PKG_DECLINED["$need_item"]:-0}" -eq 1 ]]; then
                 IFS="$saved_ifs"
                 return 1
             fi
-            local dep_conf
-            dep_conf="$(_find_pkg_manifest "$need_item" 2>/dev/null)" || dep_conf=""
-            if [[ -n "$dep_conf" && -n "${_CONF_PKG_OPTS["$dep_conf"]:-}" ]] && ! _eval_cond "" "${_CONF_PKG_OPTS["$dep_conf"]}"; then
-                IFS="$saved_ifs"
-                return 1
+            if _find_pkg_manifest "$need_item" >/dev/null 2>&1; then
+                local dep_conf="$REPLY"
+                if [[ -n "$dep_conf" && -n "${_CONF_PKG_OPTS["$dep_conf"]:-}" ]]; then
+                    if ! _eval_cond "" "${_CONF_PKG_OPTS["$dep_conf"]}"; then
+                        IFS="$saved_ifs"
+                        return 1
+                    fi
+                fi
             fi
         done
         IFS="$saved_ifs"
@@ -676,13 +714,15 @@ _package_is_active() {
 
 _get_opt() {
     local key="$1" opts="$2"
-    if [[ "$opts" =~ (^|[[:space:]])"$key":\"([^\"]+)\" ]]; then
-        printf '%s' "${BASH_REMATCH[2]}"
-    elif [[ "$opts" =~ (^|[[:space:]])"$key":\'([^\']+)\' ]]; then
-        printf '%s' "${BASH_REMATCH[2]}"
-    elif [[ "$opts" =~ (^|[[:space:]])"$key":([^[:space:]]+) ]]; then
-        printf '%s' "${BASH_REMATCH[2]}"
+    OPT_REPLY=""
+    local re1="(^|[[:space:]])${key}:\"([^\"]+)\""
+    local re2="(^|[[:space:]])${key}:'([^']+)'"
+    local re3="(^|[[:space:]])${key}:([^[:space:]]+)"
+    if [[ "$opts" =~ $re1 || "$opts" =~ $re2 || "$opts" =~ $re3 ]]; then
+        OPT_REPLY="${BASH_REMATCH[2]}"
+        printf '%s' "$OPT_REPLY"
     fi
+    return 0
 }
 
 _prompt_confirm() {
@@ -721,8 +761,8 @@ _resolve_pkg() {
     local default="$1" opts="$2" pm="$3"
     local key="$pm"
     [[ "$pm" == apt || "$pm" == apt-get ]] && key="apt"
-    local override
-    override="$(_get_opt "$key" "$opts")"
+    _get_opt "$key" "$opts" >/dev/null || true
+    local override="$OPT_REPLY"
     printf '%s' "${override:-$default}"
 }
 

@@ -113,6 +113,26 @@ _is_system_path() {
     [[ -n "${1:-}" ]] && ! _is_user_path "$1"
 }
 
+# Initialize system detection caches in the parent shell to avoid subshell detection overhead
+_init_sys_info() {
+    if [[ -z "${_SYS_ARCH_CACHE:-}" ]]; then
+        _get_arch >/dev/null || true
+    fi
+    if [[ -z "${_SYS_ENV_CACHE:-}" ]]; then
+        _get_env >/dev/null || true
+    fi
+    if [[ -z "${_SYS_IS_WSL_CACHE:-}" ]]; then
+        _is_wsl || true
+    fi
+    if [[ -z "${_SYS_IS_CONTAINER_CACHE:-}" ]]; then
+        _is_container || true
+    fi
+    if [[ -z "${_SYS_OS_CACHE:-}" ]]; then
+        _SYS_OS_CACHE="$(uname -s 2>/dev/null || echo "Linux")"
+    fi
+    return 0
+}
+
 # Check if binary exists in scoped search paths
 _check_bins_scoped() {
     REPLY=""
@@ -120,7 +140,8 @@ _check_bins_scoped() {
     local b _bins scope="${2:-any}"
     IFS=',' read -ra _bins <<< "$1"
     for b in "${_bins[@]}"; do
-        b="$(_trim "$b")"
+        b="${b#"${b%%[![:space:]]*}"}"
+        b="${b%"${b##*[![:space:]]}"}"
         [[ -z "$b" ]] && continue
 
         local -a candidates=()
@@ -143,7 +164,7 @@ _check_bins_scoped() {
 
         if [[ "$scope" == "user" || "$scope" == "any" ]]; then
             local udir
-            for udir in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.cargo/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims" "$HOME/.local/share/mise/shims" "$HOME/.bun/bin" "$HOME/go/bin" "$HOME/.atuin/bin" "$HOME/.gemini/antigravity-cli/bin" "$HOME/.opencode/bin" "$HOME/.codex/bin"; do
+            for udir in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.cargo/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims" "$HOME/.local/share/mise/shims" "$HOME/.bun/bin" "$HOME/go/bin" "$HOME/.atuin/bin" "$HOME/.gemini/antigravity-cli/bin" "$HOME/.opencode/bin" "$HOME/.codex/bin" "$HOME/.grok/bin" "$HOME/.kilo/bin" "$HOME/.copilot/bin" "$HOME/.muse/bin"; do
                 [[ -x "$udir/$b" ]] && _add_cand "$udir/$b"
             done
 

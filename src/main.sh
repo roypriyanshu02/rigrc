@@ -179,7 +179,7 @@ _main() {
     _preload_all_manifests "$PACKAGES_DIR"
 
     local cfg_name="base (built-in)"
-    [[ -n "${CONFIG_FILE:-}" ]] && cfg_name="$(basename "$CONFIG_FILE")"
+    [[ -n "${CONFIG_FILE:-}" ]] && cfg_name="${CONFIG_FILE##*/}"
     printf '  Loaded configuration: %s\n' "${BOLD}${cfg_name}${RESET}"
 
     # ── Phase 3: Identity ──

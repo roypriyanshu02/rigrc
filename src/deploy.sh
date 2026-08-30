@@ -385,7 +385,8 @@ deploy_stow() {
         if [[ -f "$DOTFILES_DIR/.stow-local-ignore" ]]; then
             local p
             while IFS= read -r p || [[ -n "$p" ]]; do
-                p="$(_trim "$p")"
+                p="${p#"${p%%[![:space:]]*}"}"
+                p="${p%"${p##*[![:space:]]}"}"
                 [[ -z "$p" || "$p" == '#'* ]] && continue
                 ignore_patterns+=("$p")
             done < "$DOTFILES_DIR/.stow-local-ignore"
