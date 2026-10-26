@@ -52,6 +52,25 @@ _write_file() {
     local rel="${dest#"$HOME/"}"
     local stow_src="$DOTFILES_DIR/$rel"
 
+    # Preserve dynamic mise tools if overwriting config.toml with a template lacking [tools]
+    if [[ "$rel" == ".config/mise/config.toml" ]]; then
+        local existing_mise=""
+        if [[ -f "$stow_src" ]]; then
+            existing_mise="$stow_src"
+        elif [[ -f "$dest" || -L "$dest" ]]; then
+            local rdest
+            rdest="$(readlink -f "$dest" 2>/dev/null || true)"
+            [[ -n "$rdest" && -f "$rdest" ]] && existing_mise="$rdest"
+        fi
+        if [[ -n "$existing_mise" ]] && grep -q "^\[tools\]" "$existing_mise" && ! printf '%s' "$content" | grep -q "^\[tools\]"; then
+            local tools_block
+            tools_block="$(awk '/^\[tools(\..*)?\]/{flag=1; print; next} /^\[/{flag=0} flag{print}' "$existing_mise")"
+            if [[ -n "$tools_block" ]]; then
+                content="${content%$'\n'}"$'\n\n'"${tools_block}"$'\n'
+            fi
+        fi
+    fi
+
     # "once": create only if absent in dotfiles directory (bypassed if FORCE=true)
     if [[ "$flags" == *once* && "$FORCE" != true && -f "$stow_src" ]]; then
         log_info "Already exists, skipping: ${rel}"
@@ -353,9 +372,18 @@ deploy_stow() {
         dest="$HOME/$rel"
         if [[ -e "$dest" || -L "$dest" ]]; then
             # Merge dynamically added tools (e.g. from mise use -g) before backup and symlinking
-            if [[ "$rel" == ".config/mise/config.toml" && -f "$dest" && ! -L "$dest" && -f "$file" ]]; then
-                if grep -q "^\[tools\]" "$dest" && ! grep -q "^\[tools\]" "$file"; then
-                    awk '/^\[tools\]/{flag=1} flag{print}' "$dest" >> "$file"
+            if [[ "$rel" == ".config/mise/config.toml" && -f "$file" ]]; then
+                local target_file="$dest"
+                [[ -L "$dest" ]] && target_file="$(readlink -f "$dest" 2>/dev/null || true)"
+                if [[ -n "$target_file" && -f "$target_file" && "$target_file" != "$file" ]]; then
+                    if grep -q "^\[tools\]" "$target_file" && ! grep -q "^\[tools\]" "$file"; then
+                        local tools_block
+                        tools_block="$(awk '/^\[tools(\..*)?\]/{flag=1; print; next} /^\[/{flag=0} flag{print}' "$target_file")"
+                        if [[ -n "$tools_block" ]]; then
+                            [[ -s "$file" && -n "$(tail -c 1 "$file" 2>/dev/null)" ]] && echo "" >> "$file"
+                            printf '%s\n' "$tools_block" >> "$file"
+                        fi
+                    fi
                 fi
             fi
 

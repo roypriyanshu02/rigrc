@@ -259,6 +259,90 @@ assert_failure "_resolve_missing_dependency detects circular dependency and retu
 assert_eq "1" "${_CONF_PKG_DECLINED["parent_pkg"]:-0}" "_resolve_missing_dependency marks parent declined on circular dependency"
 _DEP_RESOLVE_STACK=()
 
+# Test mise config.toml tools preservation during _write_file and deploy_stow
+reset_test_state
+mise_stow_src="${DOTFILES_DIR}/.config/mise/config.toml"
+mise_dest="${HOME}/.config/mise/config.toml"
+mkdir -p "$(dirname "$mise_stow_src")" "$(dirname "$mise_dest")"
+
+# 1. _write_file preserves [tools] when overwriting existing dotfile config
+cat << 'EOF' > "$mise_stow_src"
+[settings]
+experimental = false
+
+[tools]
+node = "lts"
+bun = "latest"
+EOF
+
+FORCE=true
+_write_file "~/.config/mise/config.toml" "[settings]\nexperimental = true\n" "override"
+assert_success "_write_file preserves [tools] in mise/config.toml on overwrite" grep -q "node = \"lts\"" "$mise_stow_src"
+
+# 2. deploy_stow merges [tools] even when destination is a symlink pointing to a file with [tools]
+reset_test_state
+mise_real_dest="${HOME}/.config/mise/config.real.toml"
+cat << 'EOF' > "$mise_real_dest"
+[tools]
+go = "latest"
+rust = "latest"
+EOF
+ln -sf "$mise_real_dest" "$mise_dest"
+
+cat << 'EOF' > "$mise_stow_src"
+[settings]
+experimental = true
+EOF
+
+deploy_stow
+assert_success "deploy_stow merges [tools] from symlinked destination" grep -q "go = \"latest\"" "$mise_stow_src"
+rm -f "$mise_real_dest" "$mise_dest" "$mise_stow_src"
+
+# Test custom_packages_dir functionality
+reset_test_state
+custom_dir="${TEST_TMP}/my_custom_pkgs"
+mkdir -p "$custom_dir"
+cat << 'EOF' > "$custom_dir/mycustomapp.conf"
+[package]
+name = mycustomapp
+binaries = mycustomapp
+description = Custom user application
+scope = user
+cmd = echo "installed"
+optional = true
+
+[bashrc]
+export MYCUSTOMAPP_HOME="/opt/custom"
+alias mca="mycustomapp"
+EOF
+
+# 1. Direct discovery via CUSTOM_PACKAGES_DIR
+CUSTOM_PACKAGES_DIR="$custom_dir"
+assert_success "_find_pkg_manifest finds package in CUSTOM_PACKAGES_DIR" _find_pkg_manifest "mycustomapp"
+
+# 2. Config-driven custom_packages_dir preloading
+reset_test_state
+custom_cfg="${TEST_TMP}/user_custom.conf"
+cat << EOF > "$custom_cfg"
+[config]
+custom_packages_dir = ${custom_dir}
+packages = mycustomapp
+EOF
+
+CONFIG_FILE="$custom_cfg"
+_preload_all_manifests "$PACKAGES_DIR"
+assert_eq "$custom_dir" "$CUSTOM_PACKAGES_DIR" "custom_packages_dir correctly resolved from config"
+assert_success "custom package found after preloading config" _find_pkg_manifest "mycustomapp"
+
+# 3. Collection of bashrc snippets from custom packages
+custom_snippets="$(_collect_bashrc_snippets "$PACKAGES_DIR")"
+assert_contains "$custom_snippets" "export MYCUSTOMAPP_HOME=\"/opt/custom\"" "_collect_bashrc_snippets includes custom package bashrc"
+rm -rf "$custom_dir" "$custom_cfg"
+
+# 4. Regression guard: verify deno removal
+assert_failure "_find_pkg_manifest fails for removed deno" _find_pkg_manifest "deno"
+assert_failure "deno is not in runtimes group" grep -q "deno" "${PACKAGES_DIR}/_groups.conf"
+
 # Test path traversal prevention in rollback
 bak_trav_dir="${HOME}/.dotfiles.bak/20991231_235958"
 mkdir -p "$bak_trav_dir"
