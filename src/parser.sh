@@ -200,7 +200,27 @@ _collect_bashrc_snippets() {
         printf '%s\n' "${_CONF_BASHRC_BUF["global"]}"
     fi
 
-    local group pkg
+    # Collect snippets from custom packages if selected or installed
+    if [[ -n "${CUSTOM_PACKAGES_DIR:-}" && -d "$CUSTOM_PACKAGES_DIR" ]]; then
+        local cconf
+        for cconf in "$CUSTOM_PACKAGES_DIR"/*.conf "$CUSTOM_PACKAGES_DIR"/*/*.conf; do
+            if [[ -f "$cconf" && "${cconf##*/}" != _* ]]; then
+                local cpkg_name="${cconf##*/}"; cpkg_name="${cpkg_name%.conf}"
+                local is_wanted=false
+                if [[ ${#OPTIONAL_PACKAGES[@]} -gt 0 ]]; then
+                    local op
+                    for op in "${OPTIONAL_PACKAGES[@]}"; do
+                        [[ "$op" == "$cpkg_name" ]] && { is_wanted=true; break; }
+                    done
+                else
+                    is_wanted=true
+                fi
+                if [[ "$is_wanted" == true ]] && _package_is_active "$cconf"; then
+                    printf '%s' "${_CONF_BASHRC["$cconf"]:-}"
+                fi
+            fi
+        done
+    fi
     while IFS= read -r group; do
         [[ -z "$group" ]] && continue
         _group_selected "$group" || continue
@@ -452,8 +472,8 @@ _finalize_conf_caches() {
     [[ ! -d "$pdir" ]] && return 0
 
     local conf_file
-    for conf_file in "$pdir"/*/*.conf; do
-        [[ ! -f "$conf_file" ]] && continue
+    for conf_file in "$pdir"/*.conf "$pdir"/*/*.conf; do
+        [[ ! -f "$conf_file" || "${conf_file##*/}" == _* ]] && continue
         local pkg group target_key
         pkg="${conf_file##*/}"; pkg="${pkg%.conf}"
         group="${conf_file%/*}"; group="${group##*/}"
@@ -602,6 +622,34 @@ _preload_all_manifests() {
         _parse_single_conf_file "$CONFIG_FILE" "global"
     fi
 
+    # Resolve custom packages directory (from config if not overridden by CLI)
+    if [[ -z "${CUSTOM_PACKAGES_DIR:-}" && -n "${_CONF_PKG_KEYS["global:custom_packages_dir"]:-}" ]]; then
+        local raw_cpd="${_CONF_PKG_KEYS["global:custom_packages_dir"]}"
+        raw_cpd="${raw_cpd%\"}"; raw_cpd="${raw_cpd#\"}"
+        raw_cpd="${raw_cpd%\'}"; raw_cpd="${raw_cpd#\'}"
+        if [[ "$raw_cpd" == /* || "$raw_cpd" == ~* ]]; then
+            CUSTOM_PACKAGES_DIR="${raw_cpd/#\~/$HOME}"
+        elif [[ -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+            local cfg_dir
+            cfg_dir="$(cd "$(dirname "$CONFIG_FILE")" 2>/dev/null && pwd)"
+            CUSTOM_PACKAGES_DIR="${cfg_dir:-$PWD}/$raw_cpd"
+        else
+            CUSTOM_PACKAGES_DIR="$PWD/$raw_cpd"
+        fi
+    fi
+
+    # Preload custom package manifests from CUSTOM_PACKAGES_DIR
+    if [[ -n "${CUSTOM_PACKAGES_DIR:-}" && -d "$CUSTOM_PACKAGES_DIR" ]]; then
+        local cconf
+        for cconf in "$CUSTOM_PACKAGES_DIR"/*.conf "$CUSTOM_PACKAGES_DIR"/*/*.conf; do
+            if [[ -f "$cconf" && "${cconf##*/}" != _* ]]; then
+                local cpkg_default
+                cpkg_default="$(_get_default_pkg_name "$cconf")"
+                _parse_single_conf_file "$cconf" "$cpkg_default"
+            fi
+        done
+    fi
+
     if [[ -n "${_CONF_PKG_KEYS["global:groups"]:-}" ]]; then
         local raw_ig="${_CONF_PKG_KEYS["global:groups"]//[()]/}"
         INSTALL_GROUPS=()
@@ -623,6 +671,9 @@ _preload_all_manifests() {
     fi
 
     _finalize_conf_caches "$pdir"
+    if [[ -n "${CUSTOM_PACKAGES_DIR:-}" && -d "$CUSTOM_PACKAGES_DIR" ]]; then
+        _finalize_conf_caches "$CUSTOM_PACKAGES_DIR"
+    fi
 }
 
 _get_default_pkg_name() {

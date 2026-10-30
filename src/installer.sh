@@ -176,6 +176,23 @@ _find_pkg_manifest() {
     local target="$1"
     local pdir="${PACKAGES_DIR:-$SCRIPT_DIR/packages}"
     local cand
+
+    # Check custom packages directory first if configured
+    if [[ -n "${CUSTOM_PACKAGES_DIR:-}" && -d "$CUSTOM_PACKAGES_DIR" ]]; then
+        if [[ -f "$CUSTOM_PACKAGES_DIR/${target}.conf" ]]; then
+            REPLY="$CUSTOM_PACKAGES_DIR/${target}.conf"
+            printf '%s' "$REPLY"
+            return 0
+        fi
+        for cand in "$CUSTOM_PACKAGES_DIR"/*/"${target}.conf"; do
+            if [[ -f "$cand" ]]; then
+                REPLY="$cand"
+                printf '%s' "$cand"
+                return 0
+            fi
+        done
+    fi
+
     for cand in "$pdir"/*/"${target}.conf"; do
         if [[ -f "$cand" ]]; then
             REPLY="$cand"
@@ -673,6 +690,78 @@ install_packages() {
             done
         fi
     done
+
+    # 3. Custom packages from CUSTOM_PACKAGES_DIR
+    if [[ -n "${CUSTOM_PACKAGES_DIR:-}" && -d "$CUSTOM_PACKAGES_DIR" ]]; then
+        local custom_candidates=()
+        if [[ ${#OPTIONAL_PACKAGES[@]} -gt 0 ]]; then
+            local op
+            for op in "${OPTIONAL_PACKAGES[@]}"; do
+                [[ -z "$op" ]] && continue
+                local cconf=""
+                cconf="$(_find_pkg_manifest "$op")" || true
+                if [[ -n "$cconf" && "$cconf" == "$CUSTOM_PACKAGES_DIR"* ]]; then
+                    custom_candidates+=("$op")
+                fi
+            done
+        else
+            local f
+            for f in "$CUSTOM_PACKAGES_DIR"/*.conf "$CUSTOM_PACKAGES_DIR"/*/*.conf; do
+                if [[ -f "$f" && "${f##*/}" != _* ]]; then
+                    local bname="${f##*/}"
+                    custom_candidates+=("${bname%.conf}")
+                fi
+            done
+        fi
+
+        local c_pkg_ids=() c_pkg_labels=() c_pkg_descs=() c_pkg_states=() c_pkg_locks=()
+        local c_pkg
+        for c_pkg in "${custom_candidates[@]}"; do
+            [[ -z "$c_pkg" ]] && continue
+            local cconf=""
+            cconf="$(_find_pkg_manifest "$c_pkg")" || continue
+            [[ ! -f "$cconf" ]] && continue
+
+            _parse_manifest_file "$cconf" "$c_pkg"
+            local pkg_id="$pkg_name"
+            local bin="${pkg_bin:-$pkg_id}"
+            local scope="$pkg_scope"
+            local desc="$pkg_desc"
+            local rest="${pkg_install}${pkg_install:+ }${pkg_opts}"
+
+            c_pkg_ids+=("$c_pkg")
+            c_pkg_labels+=("$pkg_id")
+            c_pkg_descs+=("$desc")
+
+            if [[ "${_CONF_PKG_DISABLED["$c_pkg"]:-0}" -eq 1 || "${_CONF_PKG_DISABLED["$pkg_id"]:-0}" -eq 1 ]]; then
+                c_pkg_locks+=("disabled:config")
+                c_pkg_states+=(0)
+            elif _check_bins_scoped "$bin" "$scope"; then
+                c_pkg_locks+=("installed")
+                c_pkg_states+=(0)
+            else
+                c_pkg_locks+=("optional")
+                c_pkg_states+=(1)
+            fi
+        done
+
+        if [[ ${#c_pkg_ids[@]} -gt 0 ]]; then
+            local chosen_custom_raw
+            chosen_custom_raw="$(_ui_multiselect "Custom Packages" c_pkg_ids c_pkg_labels c_pkg_descs c_pkg_states c_pkg_locks)"
+            local -a chosen_custom=()
+            read -ra chosen_custom <<< "$chosen_custom_raw"
+
+            local c_item
+            for c_item in "${chosen_custom[@]}"; do
+                [[ -z "$c_item" ]] && continue
+                local conf_file=""
+                conf_file="$(_find_pkg_manifest "$c_item")" || continue
+                [[ ! -f "$conf_file" ]] && continue
+
+                _install_single_package "$conf_file" "$c_item"
+            done
+        fi
+    fi
 
     return 0
 }

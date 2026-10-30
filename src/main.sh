@@ -20,6 +20,7 @@ ${BOLD}USAGE${RESET}
 
 ${BOLD}OPTIONS${RESET}
     ${CLR_PRIMARY}${SYM_BULLET}${RESET} -c, --config <file>            Load configuration file
+    ${CLR_PRIMARY}${SYM_BULLET}${RESET}     --packages-dir <dir>       Path to custom package manifests directory
     ${CLR_PRIMARY}${SYM_BULLET}${RESET} -y, --non-interactive          Run in automated non-interactive mode
     ${CLR_PRIMARY}${SYM_BULLET}${RESET} -v, --verbose                   Show verbose command output
     ${CLR_PRIMARY}${SYM_BULLET}${RESET} -f, --force, --reset            Overwrite existing files and bypass locks
@@ -106,6 +107,8 @@ _parse_args() {
         case "$1" in
             -c|--config)                          CONFIG_FILE="$2"; shift 2 ;;
             --config=*)                           CONFIG_FILE="${1#*=}"; shift ;;
+            --packages-dir)                       CUSTOM_PACKAGES_DIR="$2"; shift 2 ;;
+            --packages-dir=*)                     CUSTOM_PACKAGES_DIR="${1#*=}"; shift ;;
             --skip-upgrade)                       SKIP_UPGRADE=true; shift ;;
             -v|--verbose)                         VERBOSE=true; shift ;;
             -f|--force|--reset)                   FORCE=true; shift ;;

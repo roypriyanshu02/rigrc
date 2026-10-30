@@ -38,6 +38,7 @@ The `[config]` section defines top-level package filtering and environment tags:
 | :--- | :--- | :--- |
 | `groups` | Comma-separated package groups to install | `groups = core, shell, dev-tools` |
 | `packages` | Explicit packages to include and lock ON | `packages = starship, fzf, zstd` |
+| `custom_packages_dir` | Directory containing personal custom package manifests | `custom_packages_dir = ./packages` |
 | `exclude` | Packages to block and lock OFF | `exclude = docker, podman, dotnet` |
 | `cond` | Force-enable condition tags manually | `cond = wsl, desktop` |
 | `disable_cond` | Force-disable condition tags manually | `disable_cond = container` |

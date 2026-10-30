@@ -152,7 +152,7 @@ _lint_manifest() {
                 raw_k="${raw_k#"${raw_k%%[![:space:]]*}"}"; raw_k="${raw_k%"${raw_k##*[![:space:]]}"}"
                 local k_lower="${raw_k,,}"
                 case "$k_lower" in
-                    groups|packages|exclude|cond|disable_cond|git_user_name|git_email|git_default_branch)
+                    groups|packages|exclude|cond|disable_cond|custom_packages_dir|git_user_name|git_email|git_default_branch)
                         if [[ "$raw_k" != "$k_lower" ]]; then
                             log_warn "Config $fname: '$raw_k' in [config] should be lowercase '$k_lower'."
                         fi
@@ -170,7 +170,7 @@ _lint_manifest() {
                         errors=$((errors + 1))
                         ;;
                     *)
-                        log_error "Config $fname: Unrecognized key '$raw_k' in [config]. Allowed: groups, packages, exclude, cond, disable_cond, git_user_name, git_email."
+                        log_error "Config $fname: Unrecognized key '$raw_k' in [config]. Allowed: groups, packages, exclude, cond, disable_cond, custom_packages_dir, git_user_name, git_email, git_default_branch."
                         errors=$((errors + 1))
                         ;;
                 esac
