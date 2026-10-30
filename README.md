@@ -20,6 +20,7 @@ USAGE
 
 OPTIONS
     • -c, --config <file>        Load configuration file
+    •     --packages-dir <dir>   Path to custom package manifests directory
     • -v, --verbose              Show verbose command output
     • -f, --force, --reset       Overwrite existing files and bypass locks
     •     --env <name>           Run specific environment

@@ -71,6 +71,9 @@ groups = core, shell, dev-tools, runtimes
 # packages = starship, fzf, bat, zstd
 # exclude = docker, podman
 
+# Custom package manifests directory
+# custom_packages_dir = ./packages
+
 # Condition overrides (force enable or disable specific features)
 # cond = wsl
 # disable_cond = container
@@ -127,7 +130,56 @@ git push -u origin main
 
 ---
 
-## 3. Automating Upstream Sync with GitHub Actions
+## 3. Adding Custom Package Manifests
+
+Define private tools or custom software in your repository without modifying upstream files.
+
+### Step 1: Create a Manifests Directory
+
+Place manifests in a directory such as `packages/`:
+
+```bash
+mkdir -p packages
+```
+
+### Step 2: Write a Manifest File
+
+Create `packages/mytool.conf` using the manifest syntax:
+
+```ini
+[package]
+name = mytool
+binaries = mytool
+description = Custom internal CLI
+scope = user
+cmd = curl -fsSL https://example.com/install.sh | bash
+optional = true
+
+[bashrc]
+alias mt="mytool"
+```
+
+### Step 3: Enable the Directory in Your Config
+
+Add the path to `[config]` in `custom.conf`:
+
+```ini
+[config]
+custom_packages_dir = ./packages
+packages = mytool
+```
+
+You can also pass the directory via CLI:
+
+```bash
+./rigrc.sh --packages-dir=./packages --config=custom.conf
+```
+
+Run `./rigrc.sh --lint` to validate syntax.
+
+---
+
+## 4. Automating Upstream Sync with GitHub Actions
 
 To keep your `rigrc.sh` bundle up to date automatically, add `.github/workflows/sync.yml` to your dotfiles repository:
 
@@ -165,7 +217,7 @@ jobs:
 
 ---
 
-## 4. Provisioning a New Machine
+## 5. Provisioning a New Machine
 
 On any fresh Linux system, WSL instance, VPS, or container:
 
@@ -182,7 +234,7 @@ cd ~/.dotfiles-repo
 
 ---
 
-## 5. Maintenance & Rollbacks
+## 6. Maintenance & Rollbacks
 
 ### Environment Diagnostics
 
