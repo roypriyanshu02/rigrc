@@ -164,7 +164,7 @@ _check_bins_scoped() {
 
         if [[ "$scope" == "user" || "$scope" == "any" ]]; then
             local udir
-            for udir in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.cargo/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims" "$HOME/.local/share/mise/shims" "$HOME/.bun/bin" "$HOME/go/bin" "$HOME/.atuin/bin" "$HOME/.gemini/antigravity-cli/bin" "$HOME/.opencode/bin" "$HOME/.codex/bin" "$HOME/.grok/bin" "$HOME/.kilo/bin" "$HOME/.copilot/bin" "$HOME/.muse/bin"; do
+            for udir in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.local/bin" "$HOME/.cargo/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims" "$HOME/.local/share/mise/shims" "$HOME/.bun/bin" "$HOME/go/bin" "$HOME/.atuin/bin" "$HOME/.gemini/antigravity-cli/bin" "$HOME/.opencode/bin" "$HOME/.codex/bin" "$HOME/.grok/bin" "$HOME/.kilo/bin" "$HOME/.copilot/bin" "$HOME/.muse/bin"; do
                 [[ -x "$udir/$b" ]] && _add_cand "$udir/$b"
             done
 

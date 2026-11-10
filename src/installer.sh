@@ -120,10 +120,12 @@ _run_script() {
     local runner=()
     command -v timeout >/dev/null 2>&1 && runner=(timeout "${timeout_val}")
     local s_rc=0
+    _refresh_path
     _run_retry "$MAX_RETRIES" "$RETRY_DELAY" "$label" "${runner[@]}" bash -c "set -o pipefail; $raw_cmd" || s_rc=$?
     if [[ $s_rc -eq 124 && -z "${_LAST_CMD_ERROR:-}" ]]; then
         _LAST_CMD_ERROR="Command timed out after ${timeout_val}s"
     fi
+    [[ $s_rc -eq 0 ]] && _refresh_path
     return $s_rc
 }
 
@@ -467,6 +469,7 @@ _install_single_package() {
             _INSTALLED_PACKAGES_COUNT=$((_INSTALLED_PACKAGES_COUNT + 1))
             if [[ "$DRY_RUN" != true ]]; then
                 hash -r 2>/dev/null || true
+                _refresh_path
                 if ! _check_bins_scoped "$bin" "$scope" && [[ "$scope" != "script" ]]; then
                     log_warn "'${pkg_id}' binary not found in ${scope} PATH after installation."
                     _FAILED_PACKAGES+=("$pkg_id")

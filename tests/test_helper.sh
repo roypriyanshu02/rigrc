@@ -83,6 +83,11 @@ init_test_sandbox() {
     export TEST_TMP
     export DOTFILES_DIR="${TEST_TMP}/dotfiles"
     export HOME="${TEST_TMP}/home"
+    export XDG_BIN_HOME="${HOME}/.local/bin"
+    export XDG_DATA_HOME="${HOME}/.local/share"
+    export XDG_CONFIG_HOME="${HOME}/.config"
+    export XDG_CACHE_HOME="${HOME}/.cache"
+    export XDG_STATE_HOME="${HOME}/.local/state"
     export NON_INTERACTIVE=true
     mkdir -p "$DOTFILES_DIR" "$HOME"
 }

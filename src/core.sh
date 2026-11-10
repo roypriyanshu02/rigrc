@@ -46,6 +46,24 @@ _get_backup_dir() {
 # ---------------------------------------------------------------------------
 # Mutable globals: runtime state
 # ---------------------------------------------------------------------------
+_refresh_path() {
+    local _p
+    for _p in \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims" \
+        "${XDG_BIN_HOME:-$HOME/.local/bin}" \
+        "$HOME/.local/bin" \
+        "$HOME/bin" \
+        "$HOME/.cargo/bin" \
+        "/usr/local/bin" \
+        "/usr/local/sbin"; do
+        case ":$PATH:" in
+            *:"$_p":*) ;;
+            *) export PATH="$_p:$PATH" ;;
+        esac
+    done
+}
+_refresh_path
+
 DRY_RUN=false
 VERBOSE="${VERBOSE:-false}"
 VERIFY_SCRIPTS="${VERIFY_SCRIPTS:-false}"
