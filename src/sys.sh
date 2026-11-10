@@ -159,12 +159,22 @@ _check_bins_scoped() {
         fi
         local p
         while IFS= read -r p; do
-            [[ -n "$p" && -x "$p" ]] && _add_cand "$p"
+            if [[ -n "$p" && -x "$p" ]]; then
+                if [[ "$p" == */mise/shims/* ]]; then
+                    local mise_chk=""
+                    command -v mise >/dev/null 2>&1 && mise_chk="mise" || { [[ -x "$HOME/.local/bin/mise" ]] && mise_chk="$HOME/.local/bin/mise"; }
+                    if [[ -n "$mise_chk" && -n "$("$mise_chk" which "$b" 2>/dev/null || true)" ]]; then
+                        _add_cand "$p"
+                    fi
+                else
+                    _add_cand "$p"
+                fi
+            fi
         done < <(type -aP "$b" 2>/dev/null || true)
 
         if [[ "$scope" == "user" || "$scope" == "any" ]]; then
             local udir
-            for udir in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.local/bin" "$HOME/.cargo/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims" "$HOME/.local/share/mise/shims" "$HOME/.bun/bin" "$HOME/go/bin" "$HOME/.atuin/bin" "$HOME/.gemini/antigravity-cli/bin" "$HOME/.opencode/bin" "$HOME/.codex/bin" "$HOME/.grok/bin" "$HOME/.kilo/bin" "$HOME/.copilot/bin" "$HOME/.muse/bin"; do
+            for udir in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/.bun/bin" "$HOME/go/bin" "$HOME/.atuin/bin" "$HOME/.gemini/antigravity-cli/bin" "$HOME/.opencode/bin" "$HOME/.codex/bin" "$HOME/.grok/bin" "$HOME/.kilo/bin" "$HOME/.copilot/bin" "$HOME/.muse/bin"; do
                 [[ -x "$udir/$b" ]] && _add_cand "$udir/$b"
             done
 

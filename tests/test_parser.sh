@@ -156,6 +156,13 @@ assert_success "_check_bins_scoped returns system path" _is_system_path "$REPLY_
     assert_failure "_check_bins_scoped system rejects $bin_name" _check_bins_scoped "$bin_name" "system"
     rm -f "$tmp_user_bin"
 
+    # Test mise shim rejection when tool is not configured in mise
+    tmp_shim_dir="$HOME/.local/share/mise/shims"
+    mkdir -p "$tmp_shim_dir"
+    touch "$tmp_shim_dir/mock_unconfigured_shim_$$" && chmod +x "$tmp_shim_dir/mock_unconfigured_shim_$$"
+    assert_failure "_check_bins_scoped rejects unconfigured mise shim" _check_bins_scoped "mock_unconfigured_shim_$$" "user"
+    rm -f "$tmp_shim_dir/mock_unconfigured_shim_$$"
+
     # Test absolute non-executable file path (e.g. bash-completion)
     tmp_data_file="$TEST_TMP/mock_bash_completion_$$"
     touch "$tmp_data_file" && chmod 644 "$tmp_data_file"

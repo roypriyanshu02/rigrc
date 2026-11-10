@@ -52,7 +52,7 @@ _write_file() {
     local rel="${dest#"$HOME/"}"
     local stow_src="$DOTFILES_DIR/$rel"
 
-    # Preserve dynamic mise tools if overwriting config.toml with a template lacking [tools]
+    # Preserve dynamic mise tools if overwriting config.toml
     if [[ "$rel" == ".config/mise/config.toml" ]]; then
         local existing_mise=""
         if [[ -f "$stow_src" ]]; then
@@ -62,11 +62,24 @@ _write_file() {
             rdest="$(readlink -f "$dest" 2>/dev/null || true)"
             [[ -n "$rdest" && -f "$rdest" ]] && existing_mise="$rdest"
         fi
-        if [[ -n "$existing_mise" ]] && grep -q "^\[tools\]" "$existing_mise" && ! printf '%s' "$content" | grep -q "^\[tools\]"; then
+        if [[ -n "$existing_mise" ]] && grep -q "^\[tools\]" "$existing_mise"; then
             local tools_block
-            tools_block="$(awk '/^\[tools(\..*)?\]/{flag=1; print; next} /^\[/{flag=0} flag{print}' "$existing_mise")"
+            tools_block="$(awk '/^\[tools(\..*)?\]/{flag=1; next} /^\[/{flag=0} flag && NF && !/^[[:space:]]*#/{print}' "$existing_mise")"
             if [[ -n "$tools_block" ]]; then
-                content="${content%$'\n'}"$'\n\n'"${tools_block}"$'\n'
+                if printf '%s' "$content" | grep -q "^\[tools\]"; then
+                    local tool_line
+                    while IFS= read -r tool_line; do
+                        [[ -z "$tool_line" ]] && continue
+                        local tkey="${tool_line%%=*}"
+                        tkey="${tkey#"${tkey%%[![:space:]]*}"}"
+                        tkey="${tkey%"${tkey##*[![:space:]]}"}"
+                        if [[ -n "$tkey" ]] && ! printf '%s' "$content" | grep -q "^[[:space:]]*${tkey}[[:space:]]*="; then
+                            content="$(printf '%s\n' "$content" | sed "/^\[tools\]/a ${tool_line}")"
+                        fi
+                    done <<< "$tools_block"
+                else
+                    content="${content%$'\n'}"$'\n\n[tools]\n'"${tools_block}"$'\n'
+                fi
             fi
         fi
     fi
@@ -376,12 +389,25 @@ deploy_stow() {
                 local target_file="$dest"
                 [[ -L "$dest" ]] && target_file="$(readlink -f "$dest" 2>/dev/null || true)"
                 if [[ -n "$target_file" && -f "$target_file" && "$target_file" != "$file" ]]; then
-                    if grep -q "^\[tools\]" "$target_file" && ! grep -q "^\[tools\]" "$file"; then
+                    if grep -q "^\[tools\]" "$target_file"; then
                         local tools_block
-                        tools_block="$(awk '/^\[tools(\..*)?\]/{flag=1; print; next} /^\[/{flag=0} flag{print}' "$target_file")"
+                        tools_block="$(awk '/^\[tools(\..*)?\]/{flag=1; next} /^\[/{flag=0} flag && NF && !/^[[:space:]]*#/{print}' "$target_file")"
                         if [[ -n "$tools_block" ]]; then
-                            [[ -s "$file" && -n "$(tail -c 1 "$file" 2>/dev/null)" ]] && echo "" >> "$file"
-                            printf '%s\n' "$tools_block" >> "$file"
+                            if grep -q "^\[tools\]" "$file"; then
+                                local tool_line
+                                while IFS= read -r tool_line; do
+                                    [[ -z "$tool_line" ]] && continue
+                                    local tkey="${tool_line%%=*}"
+                                    tkey="${tkey#"${tkey%%[![:space:]]*}"}"
+                                    tkey="${tkey%"${tkey##*[![:space:]]}"}"
+                                    if [[ -n "$tkey" ]] && ! grep -q "^[[:space:]]*${tkey}[[:space:]]*=" "$file"; then
+                                        sed -i "/^\[tools\]/a ${tool_line}" "$file"
+                                    fi
+                                done <<< "$tools_block"
+                            else
+                                [[ -s "$file" && -n "$(tail -c 1 "$file" 2>/dev/null)" ]] && echo "" >> "$file"
+                                printf '[tools]\n%s\n' "$tools_block" >> "$file"
+                            fi
                         fi
                     fi
                 fi
